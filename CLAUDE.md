@@ -1481,10 +1481,11 @@ wall of card behind two thousand words reads as a form. **Exactly two cards exis
 it: Privacy's "short version", which is the honesty gesture, and Terms' "Text messaging program",
 which makes the required SMS disclosures impossible for a reviewer to miss.
 
-`utils/contact.ts` holds the contact address as one constant, because it is currently
-`kip.hafaio.noreply@gmail.com` — a real receivable mailbox whose name says the opposite, chosen as a
-testing-phase shortcut and expected to change. **It needs a forwarding rule**, or the Contact section
-is a promise nothing answers. `SiteFooter` puts the four pages on every surface a stranger can reach
+`utils/contact.ts` holds the contact address as one constant: `kip-app@googlegroups.com`, a Google
+Group. It is deliberately NOT the sending address, which is a Gmail account nobody reads. Two group
+settings are load-bearing: **posting open to anyone on the web**, or every message from a stranger
+bounces, and **conversations visible to members only**, since what arrives here is deletion
+requests, under-18 removals and privacy questions — a public archive would publish them. `SiteFooter` puts the four pages on every surface a stranger can reach
 without signing in: the welcome screen, the portal page, and each other.
 
 **No page names a person, and the operator is `hafa.io`.** Terms has to name SOME operator or there
