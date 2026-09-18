@@ -1,7 +1,7 @@
-// A send-only mailbox by name, but a real one that is read — it is the same
-// address the notification mail is sent from. Named here because four pages
-// print it and it is expected to change.
-export const CONTACT_EMAIL = "kip.hafaio.noreply@gmail.com";
+// A Google Group, not the Gmail account notification mail is sent from. It must
+// accept posts from anyone and keep its archive to members: people write here
+// about deleting their account and about minors.
+export const CONTACT_EMAIL = "kip-app@googlegroups.com";
 
 // The project's own page, and the only place "hafa.io" may link to: the bare
 // hafa.io domain is not ours — it redirects to a domain broker's listing for the
