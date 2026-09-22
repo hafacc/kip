@@ -25,9 +25,15 @@ export const metadata: Metadata = {
   description: "Share a spare room or your whole place with friends, for free.",
   // Safari reads none of the manifest for Add to Home Screen; it wants these.
   appleWebApp: { capable: true, title: "kip", statusBarStyle: "default" },
-  // Named rather than left to convention: Safari looks for /apple-touch-icon.png
-  // at the ROOT, and Pages serves kip from /<repo>.
+  // Named rather than left to convention: an explicit `icons.apple` here
+  // replaces the whole icons object, so it was silently dropping the
+  // auto-detected app/icon.svg favicon too — browsers fell back to
+  // requesting /favicon.ico at the ROOT, which Pages serves from the
+  // account's own site, not kip's. `icon` names the same convention file
+  // explicitly so both survive being sent together, both under
+  // NEXT_PUBLIC_BASE_PATH since Pages serves kip from /<repo>.
   icons: {
+    icon: `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/icon.svg`,
     apple: `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/apple-touch-icon.png`,
   },
 };
