@@ -63,9 +63,8 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      # No base path: the repo's own custom domain serves kip at its root.
       - run: bun export
-        env:
-          NEXT_PUBLIC_BASE_PATH: /${{ github.event.repository.name }}
 
       # Turns Pages on if it isn't already, so the first release doesn't fail on
       # an unclicked setting. Needs the repo to be Pages-eligible: public, on a
