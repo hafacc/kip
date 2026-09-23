@@ -2116,11 +2116,9 @@ since the last release is more trouble than just deploying them.
 
 **kip has two hosts: the app on GitHub Pages at `kip.hafa.cc`, and sign-in on Firebase Hosting at
 `auth.kip.hafa.cc`.** The app is served at the root of `kip.hafa.cc`, set as this repo's Pages custom
-domain. It used to live at `hafa.cc/kip/`, and moved because a path is not an origin: there it
-shared localStorage, IndexedDB (Firestore's offline cache and the auth session) and service-worker
-scope with every other project under `hafa.cc`, any of whose scripts could read kip's. Moving
-changed the origin, so everyone was signed out once. GitHub should redirect `hafa.cc/kip/…` to
-`kip.hafa.cc/…` now that the repo has its own domain — **unconfirmed until checked after the switch**.
+domain. **An origin of its own, not a path under `hafa.cc`**: a path shares localStorage, IndexedDB
+(Firestore's offline cache and the auth session) and service-worker scope with every other project
+under `hafa.cc`, any of whose scripts could read kip's.
 
 `auth.kip.hafa.cc` exists because it is the app's `authDomain` (`utils/firebase.ts`): the Google
 sign-in popup opens Firebase's reserved `/__/auth/*` pages on it, so the consent screen names kip's
@@ -2203,8 +2201,7 @@ without that, tsc can't resolve the firebase-functions types.
 
 ## Shipped
 
-kip is live at `https://kip.hafa.cc` (the repo is public; it was at `https://hafa.cc/kip` until
-September 2026 — see Deployment), first released by
+kip is live at `https://kip.hafa.cc` (the repo is public), first released by
 `.github/workflows/web.yml` on 2026-07-30 — the first run of that workflow, which deployed rules and
 all four functions (`onBookingCreated`, `onBookingChanged`, `onConnectRequested`, `unsubscribe`)
 before publishing Pages, exactly as designed. `kip.hafa.cc` and `auth.kip.hafa.cc` need to be
