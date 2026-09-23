@@ -17,8 +17,8 @@ export default function HelpPage(): ReactElement {
       <P>
         kip is a small, friends-only app for lending spare rooms between friends
         — no money, no public listings. It's at{" "}
-        <a className={link} href="https://hafaio.github.io/kip">
-          hafaio.github.io/kip
+        <a className={link} href="https://hafa.cc/kip">
+          hafa.cc/kip
         </a>
         .
       </P>

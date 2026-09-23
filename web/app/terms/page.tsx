@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import type { ReactElement } from "react";
 import DocPage, { Card, H2, List, link, P } from "../../components/doc-page";
-import { CONTACT_EMAIL, HAFAIO_URL, ISSUES_URL } from "../../utils/contact";
+import { CONTACT_EMAIL, HAFA_URL, ISSUES_URL } from "../../utils/contact";
 
 export const metadata: Metadata = {
   title: "Terms of Service — kip",
@@ -16,12 +16,12 @@ export default function TermsPage(): ReactElement {
     <DocPage title="Terms of Service" updated={UPDATED} route="/terms/">
       <P>
         These are the terms for using kip (
-        <a className={link} href="https://hafaio.github.io/kip">
-          https://hafaio.github.io/kip
+        <a className={link} href="https://hafa.cc/kip">
+          https://hafa.cc/kip
         </a>
         ), a friends-only space-sharing app operated by{" "}
-        <a className={link} href={HAFAIO_URL}>
-          hafa.io
+        <a className={link} href={HAFA_URL}>
+          hafa
         </a>
         . Using kip means you agree to them. They're written to be read.
       </P>

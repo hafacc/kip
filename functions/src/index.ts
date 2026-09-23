@@ -76,7 +76,7 @@ function smsConfigured(): boolean {
 }
 
 // The `/kip` tail is the GitHub Pages base path; dropping it 404s every link.
-const SITE_ORIGIN = "https://hafaio.github.io/kip";
+const SITE_ORIGIN = "https://hafa.cc/kip";
 
 const REGION = "us-central1";
 
