@@ -54,11 +54,10 @@ import {
 initializeApp();
 const db = getFirestore();
 
-// kip has no domain, so a transactional provider would be stuck on a shared
-// test sender where this address is already warm and authenticated. The address
-// rides in every From: line, so it is not a secret; only the password is.
-const GMAIL_USER = "kip.hafaio.noreply@gmail.com";
-const GMAIL_APP_PASSWORD = defineSecret("GMAIL_APP_PASSWORD");
+// Resend signs for kip.hafa.cc, so the From domain must stay on it. No Reply-To,
+// deliberately: noreply has no mailbox, so a reply bounces.
+const SENDER = "noreply@kip.hafa.cc";
+const RESEND_API_KEY = defineSecret("RESEND_API_KEY");
 
 // Empty, so SMS is off: `smsConfigured()` is checked before anything is read,
 // written or sent, the same shape `firebaseConfigured()` has on the web side.
@@ -67,7 +66,7 @@ const GMAIL_APP_PASSWORD = defineSecret("GMAIL_APP_PASSWORD");
 //
 // An API Key SID and secret rather than the account auth token: revocable and
 // scoped. The account SID is in the URL every request goes to, the key SID and
-// the From number ride in every message, so like GMAIL_USER none of them is a
+// the From number ride in every message, so like SENDER none of them is a
 // secret; only the API secret is.
 const TWILIO_ACCOUNT_SID = "";
 const TWILIO_KEY_SID = "";
@@ -113,10 +112,12 @@ type Recipient = { uid: string; email: string; name: string; unsubKey: string };
 
 function transport() {
   return nodemailer.createTransport({
-    service: "gmail",
+    host: "smtp.resend.com",
+    port: 465,
+    secure: true,
     auth: {
-      user: GMAIL_USER,
-      pass: GMAIL_APP_PASSWORD.value(),
+      user: "resend",
+      pass: RESEND_API_KEY.value(),
     },
   });
 }
@@ -209,7 +210,7 @@ async function send(to: Recipient, notice: Notice): Promise<void> {
     });
 
     const result = await transport().sendMail({
-      from: `kip <${GMAIL_USER}>`,
+      from: `kip <${SENDER}>`,
       to: to.name ? { name: to.name, address: to.email } : to.email,
       // Points at the function, not Settings: Settings is behind a sign-in and
       // a one-click POST arrives with no session.
@@ -282,7 +283,7 @@ async function emailIfWanted(
 // the whole release would wait on a credential only this switched-off branch
 // uses. Read here, a missing one fails the text and nothing else notices.
 //
-// GMAIL_APP_PASSWORD stays a declared secret. It exists, email is live, and a
+// RESEND_API_KEY stays a declared secret. It exists, email is live, and a
 // deploy that can't resolve it is a deploy worth stopping.
 //
 // One REST call each to the metadata server and Secret Manager, which is the
@@ -498,7 +499,7 @@ async function deliver(uid: string, notice: Notice): Promise<void> {
   }
 }
 
-const secrets = [GMAIL_APP_PASSWORD];
+const secrets = [RESEND_API_KEY];
 
 // A trigger has no session to hop with, but runs as admin, so it reads both
 // profiles directly — from Firestore, since the Auth record is only a mirror.

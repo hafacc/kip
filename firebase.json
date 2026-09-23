@@ -6,6 +6,21 @@
   "storage": {
     "rules": "firebase/storage.rules"
   },
+  "hosting": {
+    "public": "firebase/hosting",
+    "redirects": [
+      {
+        "source": "/",
+        "destination": "https://hafa.cc/kip/",
+        "type": 301
+      },
+      {
+        "source": "/:path*",
+        "destination": "https://hafa.cc/kip/:path",
+        "type": 301
+      }
+    ]
+  },
   "functions": {
     "source": "functions",
     "codebase": "default",

@@ -1438,7 +1438,7 @@ to the person who actually did. (The Admin SDK teardown is outside the rules, an
 
 **Addresses never touch Firestore.** The function resolves one per send via
 `admin.auth().getUser(uid)`, uses it in memory, stores nothing. That's why this is a direct send
-(nodemailer → Gmail SMTP) rather than the Trigger Email extension: the extension would park each
+(nodemailer → Resend's SMTP) rather than the Trigger Email extension: the extension would park each
 recipient's address in a `mail` document, which is the one thing this schema has consistently
 refused to do.
 
@@ -1474,14 +1474,14 @@ added later picks up its default for existing users too. The toggles stay editab
 and the only explanation would otherwise sit in a section they'd have no reason to visit. Google
 accounts arrive verified, so it only ever appears for password sign-ups.
 
-**One-click unsubscribe is RFC 8058 compliant, verified on a delivered message.** The requirements
+**One-click unsubscribe is RFC 8058 compliant, last verified on a message delivered through Gmail.** The requirements
 are an https URI in `List-Unsubscribe`, a `List-Unsubscribe-Post: List-Unsubscribe=One-Click`
 header, a per-recipient URL, a POST that unsubscribes with no further interaction, and — the part
 that isn't ours to control — a DKIM signature that COVERS both headers and aligns with the From
-domain. Gmail's signature on a real send reads
-`d=gmail.com … h=…:list-unsubscribe-post:list-unsubscribe:…`, so both are covered and aligned. It
-also *oversigns* (each name appears twice), which means nobody downstream can append a second
-`List-Unsubscribe` without breaking the signature.
+domain. That last part was measured when kip sent through Gmail (`d=gmail.com …
+h=…:list-unsubscribe-post:list-unsubscribe:…`, oversigned) and has NOT been re-checked since the
+move to Resend: read the `DKIM-Signature` on a delivered message and confirm `d=kip.hafa.cc` and
+that its `h=` lists both headers.
 
 **The GET acts too, and that is a trade made with eyes open.** 8058 specifies only the POST, so a
 browser following the link is out of scope either way — the RFC is satisfied whichever this does.
@@ -1524,31 +1524,28 @@ that email was about** — the URL is per kind, so that kind IS the list. Someon
 Unsubscribe may expect all kip mail to stop instead; if that's ever the preferred reading, it's a
 one-line change in `send`, with the page keeping the finer control.
 
-**Deliverability is the known weak spot, and a domain is the fix.** Gmail accepts everything
-(`250 OK` in the logs) and then files it as spam: a brand-new sender with no history sending HTML with an
-embedded image is close to what filters distrust by construction.
-Authentication isn't the problem — Gmail signs its own outbound, so SPF and DKIM pass. A
-`List-Unsubscribe` header pointing at the Settings screen is in (notification mail without one looks
-like mail that doesn't expect to be refused), but the rest is reputation, and reputation needs a
-domain of kip's own plus a provider whose IPs already have one. Worth knowing that **Gmail never
-displays images in a message it has filed as spam**, so the inline photo not rendering is a symptom
-of the spam verdict, not a fault in the email — the MIME is `multipart/alternative` →
-`multipart/related` with `Content-ID: <kip-photo>`, which is correct.
+**Mail goes out from kip's own domain, through Resend.** From a Gmail account it was accepted
+(`250 OK`) and then filed as spam — a brand-new sender with no history, and a From domain that
+wasn't kip's. Resend verifies `kip.hafa.cc` and DKIM-signs for it, so the reputation now builds on
+kip's own name; a new domain still starts with none, so early mail may yet land in spam. Worth
+knowing that **Gmail never displays images in a message it has filed as spam**, so an inline photo
+not rendering is a symptom of the spam verdict, not a fault in the email — the MIME is
+`multipart/alternative` → `multipart/related` with `Content-ID: <kip-photo>`, which is correct.
 
-**Gmail is a starting point, not a commitment.** kip has no domain, so every transactional provider
-would be stuck on a shared test sender; a Gmail App Password is already a warm, authenticated one.
-Limits: ~500/day, no delivery status, no custom From. Swapping to Resend (or anything else) is this
-one file plus one secret — nothing about the events depends on the transport.
+Swapping providers again is `transport()` plus one secret — nothing about the events depends on the
+transport.
 
-The sending address (`kip.hafaio.noreply@gmail.com`) is a plain constant in
-`functions/src/index.ts`, NOT a secret. It rides in the `From:` line of every email kip sends, so
-there is nothing to keep — Secret Manager would only mislabel it — and it's a send-only mailbox
-nobody reads, so being scrapeable from a public repo costs nothing. Only the App Password is a
-secret, because it's the only thing that authenticates.
+The sending address (`noreply@kip.hafa.cc`) is a plain constant in `functions/src/index.ts`, NOT a
+secret: it rides in every email kip sends. **There is no Reply-To, and replies bounce by design** —
+noreply has no mailbox and no forwarding, so an automated notice is not a way to reach a person;
+the site's contact address is. Only the Resend API key is a secret, because it's the only thing
+that authenticates.
 
-**To turn it on:** `firebase functions:secrets:set GMAIL_APP_PASSWORD` (an App Password, not the
-account password), then `firebase deploy --only functions`. Until deployed, nothing sends and
-nothing accumulates.
+**To turn it on:** `firebase functions:secrets:set RESEND_API_KEY` (a Resend API key with sending
+access for `kip.hafa.cc`), then `firebase deploy --only functions`. **Set it before releasing**: every
+trigger declares it, and the release workflow deploys functions non-interactively, which FAILS on a
+declared secret Secret Manager doesn't hold — taking rules and Pages down with it, since they wait
+on that job.
 
 ## About, Privacy, Terms and Help
 
@@ -1574,9 +1571,10 @@ wall of card behind two thousand words reads as a form. **Exactly two cards exis
 it: Privacy's "short version", which is the honesty gesture, and Terms' "Text messaging program",
 which makes the required SMS disclosures impossible for a reviewer to miss.
 
-`utils/contact.ts` holds the contact address as one constant: `kip-app@googlegroups.com`, a Google
-Group. It is deliberately NOT the sending address, which is a Gmail account nobody reads. Two group
-settings are load-bearing: **posting open to anyone on the web**, or every message from a stranger
+`utils/contact.ts` holds the contact address as one constant: `support@kip.hafa.cc`, which
+Cloudflare Email Routing forwards to the `kip-app@googlegroups.com` Google Group. It is deliberately
+NOT the sending address, which nobody reads. Two group settings are load-bearing, since forwarded
+mail still arrives under the stranger's own address: **posting open to anyone on the web**, or every message from a stranger
 bounces, and **conversations visible to members only**, since what arrives here is deletion
 requests, under-18 removals and privacy questions — a public archive would publish them. `SiteFooter` puts the four pages on every surface a stranger can reach
 without signing in: the welcome screen, the portal page, and each other.
@@ -1598,7 +1596,7 @@ in the config — but `RecaptchaVerifier` loads Google reCAPTCHA, which fingerpr
 score it. Naming the exception is better copy than a quietly weakened claim, and the exception is
 genuinely narrow: it is constructed inside `sendReach`, so it never loads for anyone signing in by
 email or with Google, and not even for phone until a number is submitted. It has its own bullet in
-"Services kip relies on" beside Firebase, GitHub Pages, Gmail and Twilio. Twilio is deliberately NOT
+"Services kip relies on" beside Firebase, GitHub Pages, Resend and Twilio. Twilio is deliberately NOT
 also listed in Terms: Privacy owns the vendor list, the campaign review checks Terms for the SMS
 PROGRAM disclosures rather than the vendor's name, and two copies of a vendor list drift.
 
@@ -2103,13 +2101,25 @@ the additive fix (note anonymous auth bypasses blocking functions).
 ## Deployment
 
 `.github/workflows/web.yml` (manual `workflow_dispatch` or a published Release) does the whole
-release: CI gate → **Firebase** (Firestore rules, Storage rules and functions) → GitHub Pages (`bun export` with
+release: CI gate → **Firebase** (Firestore rules, Storage rules, functions and Hosting) → GitHub Pages (`bun export` with
 `NEXT_PUBLIC_BASE_PATH=/<repo>`, uploads `web/out`).
 
 **Firebase goes first, deliberately.** The site must never publish expecting rules or triggers that
 aren't live yet; if that job fails, Pages never runs and the site stays on the last good version.
 Both rule sets deploy every time (seconds, idempotent); functions too, since working out whether they changed
 since the last release is more trouble than just deploying them.
+
+**Firebase Hosting serves `kip.hafa.cc`, and it serves no pages.** That domain exists because it is
+the app's `authDomain` (`utils/firebase.ts`): the Google sign-in popup opens Firebase's reserved
+`/__/auth/*` pages on it, so the consent screen names kip's domain instead of a `firebaseapp.com`
+one. The app itself lives on GitHub Pages at `hafa.cc/kip/`. The `hosting` block in `firebase.json`
+therefore 301s every path onto the same path under `https://hafa.cc/kip/` — `/about` to `/kip/about`,
+which Pages then slashes to `/kip/about/`. `/` has its own rule ahead of the `/:path*` capture so the
+root lands on exactly `https://hafa.cc/kip/` without leaning on how an empty capture expands. And `firebase/hosting/` is a placeholder only because Hosting
+insists on a `public` directory. Reserved `/__/*` paths are answered by Firebase ahead of any
+redirect, so sign-in is unaffected — the one thing to confirm after the first deploy that includes
+Hosting is that `https://kip.hafa.cc/__/auth/handler` still returns 200. The domain must stay a
+plain domain in the console's Hosting settings: set there as a redirect, it overrides this config.
 
 **Auth is Workload Identity Federation — no key is stored anywhere.** GitHub mints a short-lived
 OIDC token (that's what `id-token: write` in the workflow is for) and GCP trades it for impersonation
@@ -2180,7 +2190,8 @@ kip is live at `https://hafa.cc/kip` (the repo is public), released by
 `.github/workflows/web.yml` on 2026-07-30 — the first run of that workflow, which deployed rules and
 all four functions (`onBookingCreated`, `onBookingChanged`, `onConnectRequested`, `unsubscribe`)
 before publishing Pages, exactly as designed. `hafa.cc` is an authorized domain in Firebase
-Auth, the Gmail App Password secret is set, and `SITE_ORIGIN` in `functions/src/index.ts` matches
+Auth, the email secret was set (since replaced: `RESEND_API_KEY` must be set before the next
+release — see Notifications), and `SITE_ORIGIN` in `functions/src/index.ts` matches
 where Pages actually serves.
 
 **`hafaio-kip-dev` IS production**, despite the name — `.firebaserc` and the config in
@@ -2387,7 +2398,7 @@ lines it returns alongside are deploys, not invocations.
   the blocked send. Worth addressing the "but I've sent Twilio texts instantly" memory head-on,
   because it is a reasonable one: a trial account texting its own verified numbers still works, as
   does non-US. One thing this gets right that kip's email does not: a blocked SMS fails loudly with
-  an error code, where Gmail accepts everything and silently files it as spam.
+  an error code, where an email can be accepted and then silently filed as spam.
 
   **"File it first" is true of the BRAND and false of the CAMPAIGN**, which an earlier version of
   this note got wrong. Brand registration depends on nothing in the repo — file it the moment the
@@ -2646,14 +2657,14 @@ lines it returns alongside are deploys, not invocations.
   whole site's release, rules and triggers and Pages, behind a credential only this switched-off
   branch has any use for, held up by nothing but a hand-created empty placeholder. Read at send time
   it is a runtime condition instead: a missing one raises, `deliver` settles it, the email beside it
-  is untouched, and nothing else notices. `GMAIL_APP_PASSWORD` stays a declared secret — it exists,
+  is untouched, and nothing else notices. `RESEND_API_KEY` stays a declared secret — it exists,
   email is live, and a deploy that can't resolve it is a deploy worth stopping. What proves the
   decoupling is the discovery output the CLI itself reads: `functions.__endpoint
-  .secretEnvironmentVariables` on all four triggers names GMAIL_APP_PASSWORD and nothing else. The
+  .secretEnvironmentVariables` on all four triggers named the email secret and nothing else. The
   gate is also what stays off through the 3–6 week approval window, since a present credential is not sufficient:
   before the campaign is approved every send returns 30034 and is billed anyway. Use an **API Key SID
   + Secret**, not the account auth token — revocable and scoped; the SID and the From number are
-  plain constants like `GMAIL_USER`, since an identifier and a number that rides in every message are
+  plain constants like the email sender, since an identifier and a number that rides in every message are
   not secrets.
 
   **The sole-proprietor throughput cap does not bite.** It is ~1,000 messages/day to T-Mobile and ~15

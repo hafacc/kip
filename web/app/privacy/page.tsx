@@ -199,8 +199,8 @@ export default function PrivacyPage(): ReactElement {
         kip emails you about things that happen to you — a request, an answer, a
         cancellation — and only to an address you've confirmed. Each kind of
         email can be turned off in Settings, and every email carries a one-click
-        unsubscribe for its kind. Notification email is currently delivered via
-        Gmail, which processes the message in transit.
+        unsubscribe for its kind. Notification email is delivered via Resend,
+        which processes the message in transit.
       </P>
 
       <H2>Services kip relies on</H2>
@@ -227,7 +227,7 @@ export default function PrivacyPage(): ReactElement {
           you load the page.
         </li>
         <li>
-          <strong>Gmail</strong> — delivers notification email.
+          <strong>Resend</strong> — delivers notification email.
         </li>
         <li>
           <strong>Twilio</strong> — delivers notification texts, if you've

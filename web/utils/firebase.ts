@@ -18,7 +18,8 @@ import { type FirebaseStorage, getStorage } from "firebase/storage";
 // `appId` makes `firebaseConfigured()` false, so the app still runs unconfigured.
 export const firebaseConfig = {
   apiKey: "AIzaSyDvsK-HqXYuHuYlxO_IFh8aGWly6c7_yDI",
-  authDomain: "hafaio-kip-dev.firebaseapp.com",
+  // A Firebase Hosting custom domain; the Google sign-in popup shows this name.
+  authDomain: "kip.hafa.cc",
   projectId: "hafaio-kip-dev",
   storageBucket: "hafaio-kip-dev.firebasestorage.app",
   messagingSenderId: "230290747847",
