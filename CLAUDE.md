@@ -1432,8 +1432,8 @@ Unsubscribe may expect all kip mail to stop instead; if that's ever the preferre
 one-line change in `send`, with the page keeping the finer control.
 
 **Deliverability is the known weak spot, and a domain is the fix.** Gmail accepts everything
-(`250 OK` in the logs) and then files it as spam: a brand-new sender with no history, HTML with an
-embedded image, and links to a `github.io` URL is close to what filters distrust by construction.
+(`250 OK` in the logs) and then files it as spam: a brand-new sender with no history sending HTML with an
+embedded image is close to what filters distrust by construction.
 Authentication isn't the problem — Gmail signs its own outbound, so SPF and DKIM pass. A
 `List-Unsubscribe` header pointing at the Settings screen is in (notification mail without one looks
 like mail that doesn't expect to be refused), but the rest is reputation, and reputation needs a
@@ -1488,12 +1488,9 @@ bounces, and **conversations visible to members only**, since what arrives here 
 requests, under-18 removals and privacy questions — a public archive would publish them. `SiteFooter` puts the four pages on every surface a stranger can reach
 without signing in: the welcome screen, the portal page, and each other.
 
-**No page names a person, and the operator is `hafa.io`.** Terms has to name SOME operator or there
+**No page names a person, and the operator is `hafa`.** Terms has to name SOME operator or there
 is no counterparty to the agreement, so that one is replaced rather than cut; About's "Who makes it"
-is one sentence and Privacy's opening one clause. The name links to `HAFAIO_URL`
-(`hafaio.github.io`, whose own title is already "hafa.io") and **never to `hafa.io` itself**, which
-is not ours — it redirects to a domain broker's listing for the name, and a legal page pointing at a
-sales page is worse than one that just uses the word.
+is one sentence and Privacy's opening one clause. The name links to `HAFA_URL` (`hafa.cc`).
 
 **Contact is GitHub issues except where an address is the point.** About's "Getting in touch" is
 gone entirely, because Help is the contact page and sits in the footer of all four. The address
@@ -1970,7 +1967,7 @@ If port 8080 is already held by another project's emulator, switch both `firebas
    fictional **test phone numbers** there too, since phone auth refuses localhost and there is no
    other way to exercise it locally outside the Auth emulator. Optionally turn on **reCAPTCHA SMS
    defense** in audit mode; with US-only plus the per-IP caps, audit is likely enough indefinitely.
-   Confirm `hafaio.github.io` and `localhost` are authorized domains — the sign-in link redirects
+   Confirm `hafa.cc` and `localhost` are authorized domains — the sign-in link redirects
    there. And **anonymous account auto-deletion must be OFF** (it lives on the Anonymous provider,
    not under Settings): it cannot read Firestore, so it cannot tell a one-visit ticket from someone
    carrying a name, a live ask and friendships, and re-enabling it deletes real people on a timer
@@ -2006,7 +2003,7 @@ since the last release is more trouble than just deploying them.
 **Auth is Workload Identity Federation — no key is stored anywhere.** GitHub mints a short-lived
 OIDC token (that's what `id-token: write` in the workflow is for) and GCP trades it for impersonation
 of `kip-deployer@hafaio-kip-dev.iam.gserviceaccount.com`. The provider only accepts tokens whose
-`repository` claim is `hafaio/kip`, so no other repo — and no leaked file — can use it. Set up once
+`repository` claim is `hafacc/kip`, so no other repo — and no leaked file — can use it. Set up once
 with:
 
 ```
@@ -2014,10 +2011,10 @@ gcloud iam workload-identity-pools create github --location=global
 gcloud iam workload-identity-pools providers create-oidc kip-deploy --workload-identity-pool=github \
   --issuer-uri=https://token.actions.githubusercontent.com \
   --attribute-mapping=google.subject=assertion.sub,attribute.repository=assertion.repository \
-  --attribute-condition="assertion.repository == 'hafaio/kip'"
+  --attribute-condition="assertion.repository == 'hafacc/kip'"
 gcloud iam service-accounts add-iam-policy-binding kip-deployer@... \
   --role=roles/iam.workloadIdentityUser \
-  --member=principalSet://iam.googleapis.com/projects/<num>/locations/global/workloadIdentityPools/github/attribute.repository/hafaio/kip
+  --member=principalSet://iam.googleapis.com/projects/<num>/locations/global/workloadIdentityPools/github/attribute.repository/hafacc/kip
 ```
 
 The deployer holds `firebase.admin`, `cloudfunctions.admin`, `run.admin`, `artifactregistry.admin`,
@@ -2063,10 +2060,10 @@ without that, tsc can't resolve the firebase-functions types.
 
 ## Shipped
 
-kip is live at `https://hafaio.github.io/kip` (the repo is public), released by
+kip is live at `https://hafa.cc/kip` (the repo is public), released by
 `.github/workflows/web.yml` on 2026-07-30 — the first run of that workflow, which deployed rules and
 all four functions (`onBookingCreated`, `onBookingChanged`, `onConnectRequested`, `unsubscribe`)
-before publishing Pages, exactly as designed. `hafaio.github.io` is an authorized domain in Firebase
+before publishing Pages, exactly as designed. `hafa.cc` is an authorized domain in Firebase
 Auth, the Gmail App Password secret is set, and `SITE_ORIGIN` in `functions/src/index.ts` matches
 where Pages actually serves.
 
