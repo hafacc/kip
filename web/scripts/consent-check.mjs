@@ -397,6 +397,7 @@ expect(
 // why rather than sitting greyed out with no reason on it.
 if (!SMS_LIVE) {
   console.log("\nwith no number to text from, texts cannot be turned on");
+  expect("adding a number asked nothing", !(await dialogAsked(page)));
   await showTexts(page);
   await page.shot("0-texts-unavailable");
   const gated = await textsRow(page);

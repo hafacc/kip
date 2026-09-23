@@ -6,8 +6,10 @@
 // It builds the export and serves it itself, because both claims are about the
 // PRODUCTION bundle: `next dev` serves modules a cache would hand back stale, so
 // the worker deliberately does not register there and none of this is reachable
-// from the dev server the other checks use. No emulator either — nothing here
-// signs in.
+// from the dev server the other checks use. No emulator: the export carries the
+// real project's config, so every request to Firebase Auth is failed in the
+// browser before it leaves — otherwise the portal visit's anonymous sign-in
+// would mint a real account in production on every run.
 //
 // What it does NOT cover is a signed-in kip offline: that rests on Firestore's
 // own IndexedDB persistence, which needs a real session against the real project
@@ -80,9 +82,7 @@ async function browser() {
     ],
     { stdio: "ignore" },
   );
-  // Reaped on any throw, not just the last line: the server has had this since
-  // it was written and the browser did not, so a failed assertion left a Chrome
-  // holding the debug port and the profile.
+  // Reaped on any throw.
   process.on("exit", () => chrome?.kill());
   await new Promise((done) => setTimeout(done, 5000));
   const targets = await (
@@ -121,7 +121,31 @@ async function browser() {
   await send("Page.enable");
   await send("Runtime.enable");
   await send("Network.enable");
+  // Sign-in, token refresh and account lookup all go through these two hosts,
+  // so failing them is what keeps a run from creating a production account.
+  // The page-level Fetch domain sees these because the worker never touches a
+  // cross-origin request.
+  await send("Fetch.enable", {
+    patterns: [
+      { urlPattern: "*identitytoolkit.googleapis.com*" },
+      { urlPattern: "*securetoken.googleapis.com*" },
+    ],
+  });
+  const blocked = [];
+  socket.addEventListener("message", (event) => {
+    const message = JSON.parse(event.data);
+    if (message.method !== "Fetch.requestPaused") return;
+    blocked.push(message.params.request.url);
+    socket.send(
+      JSON.stringify({
+        id: ++id,
+        method: "Fetch.failRequest",
+        params: { requestId: message.params.requestId, errorReason: "BlockedByClient" },
+      }),
+    );
+  });
   return {
+    blocked,
     send,
     evaluate: async (expression) =>
       (
@@ -182,6 +206,26 @@ const worker = await page.evaluate(`(async () => {
   return reg.active ? "active" : "registered, not active";
 })()`);
 expect("the worker registers and activates", worker === "active", String(worker));
+
+// Read before any navigation the worker controls: the load that installed it
+// was not seen by it, so anything held now was put there by the install step.
+// Without this entry, installing kip and losing signal opens the browser's
+// offline page from the new icon.
+const precached = JSON.parse(
+  (await page.evaluate(`(async () => {
+  const out = [];
+  for (const name of await caches.keys()) {
+    const cache = await caches.open(name);
+    for (const request of await cache.keys()) out.push(request.url);
+  }
+  return JSON.stringify(out);
+})()`)) ?? "[]",
+);
+expect(
+  "the install step pre-caches the scope root",
+  precached.includes(`${APP}/`),
+  precached.join(" ") || "(nothing cached)",
+);
 
 console.log("\nand it writes no capability into the cache");
 // A navigation's `request.url` carries the query AND the fragment — measured in
@@ -268,7 +312,12 @@ const offlinePortal = String(
   (await page.evaluate("document.body.innerText")) ?? "",
 ).replace(/\s+/g, " ");
 expect(
-  "an offline share link does not claim to be revoked",
+  "an offline share link says kip is unreachable",
+  offlinePortal.includes("Can't reach kip right now"),
+  offlinePortal.slice(0, 100),
+);
+expect(
+  "and does not claim to be revoked",
   !/isn't active|turned off or regenerated/.test(offlinePortal),
   offlinePortal.slice(0, 100),
 );
@@ -276,13 +325,19 @@ expect(
 expect(
   "kip renders with no network at all",
   // kip's own words, not the absence of an error: a blank page and a browser
-  // error page both pass a blacklist. Either state counts — the portal visit
-  // above signs this browser in anonymously, so what renders here is Home
-  // rather than the door.
-  /Spare rooms and empty flats|Welcome back/.test(screen),
+  // error page both pass a blacklist. The door, because sign-in is blocked
+  // above and so this browser never holds a session.
+  /Spare rooms and empty flats/.test(screen),
   screen.slice(0, 100),
 );
 
+// Positive, so the block is shown to be the thing standing between the portal
+// visit and a production account rather than assumed: the sign-in was tried.
+expect(
+  "the portal's anonymous sign-in was attempted and failed in the browser",
+  page.blocked.some((url) => url.includes("accounts:signUp")),
+  page.blocked.map((url) => url.split("?")[0]).join(" ") || "(no auth request seen)",
+);
 chrome.kill();
 server.kill();
 console.log(

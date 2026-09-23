@@ -145,6 +145,7 @@ export default function ListingForm({
           <Input
             className="min-w-0 flex-1"
             placeholder="Address or area (e.g. Brooklyn, NY)"
+            aria-label="Address"
             value={label}
             onChange={(event) => {
               setLabel(event.target.value);

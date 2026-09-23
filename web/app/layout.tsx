@@ -10,9 +10,6 @@ import ThemeColor from "../components/theme-color";
 import { KipProvider } from "../utils/store";
 import "./globals.css";
 
-// Plus Jakarta Sans carries the whole Terra identity — body and headings alike,
-// headings just heavier and tighter. Self-hosted into the static export and
-// exposed as the --font-jakarta CSS var (wired to --font-sans in globals.css).
 const jakarta = Plus_Jakarta_Sans({
   subsets: ["latin"],
   weight: ["400", "500", "600", "700", "800"],
@@ -25,13 +22,8 @@ export const metadata: Metadata = {
   description: "Share a spare room or your whole place with friends, for free.",
   // Safari reads none of the manifest for Add to Home Screen; it wants these.
   appleWebApp: { capable: true, title: "kip", statusBarStyle: "default" },
-  // Named rather than left to convention: an explicit `icons.apple` here
-  // replaces the whole icons object, so it was silently dropping the
-  // auto-detected app/icon.svg favicon too — browsers fell back to
-  // requesting /favicon.ico at the ROOT, which Pages serves from the
-  // account's own site, not kip's. `icon` names the same convention file
-  // explicitly so both survive being sent together, both under
-  // NEXT_PUBLIC_BASE_PATH since Pages serves kip from /<repo>.
+  // Setting `icons` at all stops Next adding app/icon.svg on its own, so it is
+  // named here too.
   icons: {
     icon: `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/icon.svg`,
     apple: `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/apple-touch-icon.png`,
@@ -55,16 +47,8 @@ export default function RootLayout({
 }): ReactElement {
   return (
     <html lang="en" suppressHydrationWarning className={jakarta.variable}>
-      {/* Every screen's first act is to sign in and read, and each host costs a
-          DNS lookup and a TLS handshake before a byte of that moves. Starting
-          them alongside the bundle download matters most on the share-link page,
-          which a stranger opens cold with nothing warmed by a previous visit.
-
-          `crossOrigin` has to MATCH how the request is eventually made or the
-          socket lands in the wrong pool and is never reused — the hint then
-          costs a connection and saves nothing. The SDK reaches the three API
-          hosts by CORS fetch/XHR with no credentials; photos are plain <img
-          src>, so that one takes no attribute. */}
+      {/* crossOrigin must match the SDK's CORS fetch or the preconnected
+          socket isn't reused; photos are plain <img>, so none. */}
       <head>
         <link
           rel="preconnect"

@@ -182,6 +182,7 @@ export default function ReachField({
         value={state.raw}
         onChange={(event) => onChange({ ...state, raw: event.target.value })}
         placeholder={phoneMode ? "(415) 555-0123" : "you@example.com"}
+        aria-label={phoneMode ? "Phone number" : "Email"}
         wideSuffix
         suffix={
           state.raw || only ? undefined : (

@@ -85,18 +85,21 @@ export default function ContinuePage(): ReactElement {
   const [mode, setMode] = useState<"attach" | "return">("attach");
   const [host, setHost] = useState<string | null>(null);
 
-  // The whole job, callable again by the retry button — no counter, so nothing
-  // has to be a dependency that isn't read.
   // The one-time code may be spent ONCE. React's StrictMode mounts every effect
   // twice in dev, and the cleanup below only stops the first run from writing
   // state — it cannot recall a request already in flight. Without this the
   // second mount always found the code spent, so the email door was the one
   // path a local run could never verify.
   const spent = useRef<string | null>(null);
-  // Which attempt owns the outcome. Cancelling is a newer attempt starting, not
-  // a teardown: StrictMode's remount is refused by `spent`, so a teardown that
-  // muted the first left the page on "working" with no answer and no timer.
+  // Which attempt owns a failure or a stall. Cancelling is a newer attempt
+  // starting, not a teardown: StrictMode's remount is refused by `spent`, so a
+  // teardown that muted the first left the page on "working" with no answer and
+  // no timer. A success belongs to every attempt — see `finished`.
   const attempt = useRef(0);
+  // Set by the first attempt that succeeds, whichever it was. A retry after a
+  // stall resends a code the stalled call may yet spend, so the retry's refusal
+  // can arrive before, or after, the success it lost to.
+  const finished = useRef(false);
   const link = useRef<Link | null>(null);
 
   const attach = useCallback((retrying = false): void => {
@@ -125,10 +128,8 @@ export default function ContinuePage(): ReactElement {
     }
 
     const code = held.oobCode;
-    // A retry is a deliberate second send, and this guard is only about the
-    // second MOUNT — refusing one left the page on `working` with nothing on it,
-    // since returning here sets no outcome at all.
-    // Before claiming an attempt, or the refused run takes ownership from the
+    // Only refuses the second MOUNT; a retry deliberately resends. Checked
+    // before claiming an attempt, or the refused run takes ownership from the
     // one still in flight.
     if (!retrying && spent.current === code) return;
     spent.current = code;
@@ -140,7 +141,7 @@ export default function ContinuePage(): ReactElement {
     // because a call that ANSWERED has already spent the one-time code — posting
     // it again would report failure for a flow that worked.
     const timer = setTimeout(() => {
-      if (live()) setOutcome("stalled");
+      if (live() && !finished.current) setOutcome("stalled");
     }, CONTINUE_TIMEOUT_MS);
 
     // Two calls, because the modes want different things from the answer.
@@ -175,7 +176,9 @@ export default function ContinuePage(): ReactElement {
           error.message === EMAIL_EXISTS ? "taken" : "failed",
       )
       .then((result) => {
-        if (!live()) return;
+        if (finished.current) return;
+        if (result === "done") finished.current = true;
+        else if (!live()) return;
         clearTimeout(timer);
         setOutcome(result);
       });
@@ -184,6 +187,12 @@ export default function ContinuePage(): ReactElement {
   useEffect(() => {
     attach();
   }, [attach]);
+
+  // A new attempt is the cancellation: the old one no longer owns a failure.
+  function retry(): void {
+    setOutcome("working");
+    attach(true);
+  }
 
   // Returning ends in the app itself: the sign-in has happened and this is the
   // device they want it on, so a panel with a button on it is a step between
@@ -259,6 +268,36 @@ export default function ContinuePage(): ReactElement {
               asked it.
             </p>
           </div>
+        ) : mode === "return" ? (
+          <div className="flex flex-col items-center gap-3">
+            <h1 className="text-xl font-bold tracking-[-0.02em]">
+              {outcome === "stalled"
+                ? "This page can't get through"
+                : "That link didn't sign you in"}
+            </h1>
+            <p className="max-w-xs text-sm text-muted">
+              {outcome === "stalled"
+                ? "Try again, or open kip and ask for a fresh link."
+                : "It may have been used already, or be too old. Open kip and ask for a fresh one."}
+            </p>
+            <div className="flex gap-2">
+              {outcome === "stalled" ? (
+                <button
+                  type="button"
+                  onClick={retry}
+                  className="h-11 rounded-full bg-surface px-5 text-sm font-semibold shadow-card"
+                >
+                  Try again
+                </button>
+              ) : null}
+              <a
+                href={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/`}
+                className="inline-flex h-11 items-center rounded-full bg-gradient-accent px-5 text-sm font-semibold text-white shadow-glow"
+              >
+                Open kip
+              </a>
+            </div>
+          </div>
         ) : (
           <div className="flex flex-col items-center gap-3">
             <h1 className="text-xl font-bold tracking-[-0.02em]">
@@ -278,12 +317,7 @@ export default function ContinuePage(): ReactElement {
             {outcome === "stalled" ? (
               <button
                 type="button"
-                onClick={() => {
-                  // A new attempt is the cancellation: the old one no longer
-                  // owns the outcome.
-                  setOutcome("working");
-                  attach(true);
-                }}
+                onClick={retry}
                 className="h-11 rounded-full bg-surface px-5 text-sm font-semibold shadow-card"
               >
                 Try again

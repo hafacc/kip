@@ -2,17 +2,10 @@
 
 import type { ComponentPropsWithRef, ReactElement, ReactNode } from "react";
 
-// The one text input for the app: a white surface with the only visible border +
-// an accent focus ring, at the shared 44px (h-11) control height and text-base
-// (≥16px, so iOS Safari doesn't zoom on focus). `prefix` renders a static
-// adornment (e.g. the "@" on a handle field); `suffix` a trailing slot (e.g. a
-// validity spinner/check). A suffix holding WORDS rather than a glyph needs the
-// text kept further clear of it, which is what `wideSuffix` is for — the gutter
-// can't just be widened for everyone, or the handle field's tick sits in a hole.
-// `invalid` reddens the box so it and the message under it read as one object;
-// it lives here rather than beside any one caller because every field that can
-// be complained about is this same input.
-// Everything else is a normal <input>.
+// text-base (≥16px) so iOS Safari doesn't zoom on focus. A suffix holding WORDS
+// rather than a glyph needs the text kept further clear of it, which is what
+// `wideSuffix` is for — the gutter can't just be widened for everyone, or the
+// handle field's tick sits in a hole.
 export default function Input({
   prefix,
   suffix,

@@ -1,6 +1,12 @@
 "use client";
 
-import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
+import {
+  doc,
+  getDoc,
+  serverTimestamp,
+  setDoc,
+  writeBatch,
+} from "firebase/firestore";
 import { db } from "./firebase";
 
 // Mirrored in firestore.rules, so a crafted client can't grab a bad handle.
@@ -65,18 +71,22 @@ export async function createProfile(
   await setDoc(doc(db(), "users", uid), fields, { merge: true });
 }
 
-// Registry FIRST, and that ordering is the whole uniqueness guarantee: a
-// collision is denied by the registry's owner-only update rule, so the profile
-// write never happens. Searchability rides along, a handle existing to be found by.
+// One batch, and the rules require it: a registry entry is refused unless the
+// profile names it once the commit lands, which is what caps an account at one
+// handle. A collision is denied by the registry's owner-only update rule and
+// takes the profile write down with it. Searchability rides along, a handle
+// existing to be found by.
 export async function claimUsername(
   uid: string,
   username: string,
 ): Promise<void> {
   const handle = normalizeUsername(username);
-  await setDoc(doc(db(), "usernames", handle), { uid });
-  await setDoc(
+  const batch = writeBatch(db());
+  batch.set(doc(db(), "usernames", handle), { uid });
+  batch.set(
     doc(db(), "users", uid),
     { username: handle, searchable: true },
     { merge: true },
   );
+  await batch.commit();
 }

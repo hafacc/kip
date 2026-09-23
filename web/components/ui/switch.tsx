@@ -2,9 +2,6 @@
 
 import type { ReactElement } from "react";
 
-// A labeled on/off switch rendered as a track + thumb (never a pill button).
-// ON is the gradient track. Renders as a full-width row so it drops cleanly into
-// a grouped list: label + optional description on the left, the toggle right.
 export default function Switch({
   checked,
   onChange,

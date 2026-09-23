@@ -10,21 +10,24 @@ import {
 // Walks a run of losses through the decision, returning what each one bought.
 function run(
   gaps: readonly number[],
-): { verdicts: string[]; delays: number[] } {
+): { verdicts: string[]; delays: number[]; announced: boolean[] } {
   let state: ReattachState = NO_LOSSES;
   let now = 1_000_000;
   const verdicts: string[] = [];
   const delays: number[] = [];
+  const announced: boolean[] = [];
   for (const gap of gaps) {
     now += gap;
     const decision = decideReattach(state, now);
     verdicts.push(decision.verdict);
     if (decision.verdict === "retry") {
       delays.push(decision.delay);
-      state = decision.next;
+    } else {
+      announced.push(decision.announce);
     }
+    state = decision.next;
   }
-  return { verdicts, delays };
+  return { verdicts, delays, announced };
 }
 
 describe("reattach budget", () => {
@@ -74,5 +77,53 @@ describe("reattach budget", () => {
       expect(decision.delay).toBe(REATTACH_DELAYS[0]);
       expect(decision.next.spent).toBe(1);
     }
+  });
+
+  test("giving up is announced once per incident", () => {
+    // Listeners attached after giving up can still be lost; each loss must not
+    // write another debug event.
+    const { verdicts, announced } = run([0, 100, 100, 100, 100, 100]);
+    expect(verdicts.slice(3)).toEqual(["giveUp", "giveUp", "giveUp"]);
+    expect(announced).toEqual([true, false, false]);
+  });
+
+  test("losses after giving up keep the incident open", () => {
+    // Each loss moves the clock the quiet window is measured from, so a bleed
+    // after giving up never quietly refills the budget.
+    const gap = REATTACH_QUIET - 1;
+    const { verdicts, announced } = run([0, 100, 100, 100, gap, gap]);
+    expect(verdicts).toEqual([
+      "retry",
+      "retry",
+      "retry",
+      "giveUp",
+      "giveUp",
+      "giveUp",
+    ]);
+    expect(announced).toEqual([true, false, false]);
+  });
+
+  test("a new incident after giving up retries and may announce again", () => {
+    const { verdicts, announced } = run([
+      0,
+      100,
+      100,
+      100,
+      REATTACH_QUIET + 1,
+      100,
+      100,
+      100,
+    ]);
+    expect(verdicts).toEqual([
+      "retry",
+      "retry",
+      "retry",
+      "giveUp",
+      "retry",
+      "retry",
+      "retry",
+      "giveUp",
+    ]);
+    expect(announced).toEqual([true, true]);
   });
 });

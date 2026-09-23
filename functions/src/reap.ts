@@ -163,9 +163,7 @@ export async function reapTickets(dryRun: boolean): Promise<ReapReport> {
   } while (pageToken);
 
   if (!dryRun) {
-    // 100, not 1000: `getUsers` caps identifiers at a hundred and THROWS past
-    // it, so a re-read sized to `deleteUsers`' limit killed the whole run before
-    // a single delete — invisibly, because dry-run skips this block entirely.
+    // `getUsers` caps at 100 and throws past it.
     for (let at = 0; at < doomed.length; at += 100) {
       const batch = doomed.slice(at, at + 100);
       // Re-read immediately before deleting. Auth and Firestore share no

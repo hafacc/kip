@@ -40,6 +40,9 @@ export default function SlotRow({
       if (outcome === "unavailable") {
         setNote("Just taken by someone else.");
         await refreshWindows(listing.id);
+      } else if (outcome === "changed") {
+        setNote("These dates have changed — take another look.");
+        await refreshWindows(listing.id);
       } else if (outcome === "confirmed") {
         await refreshWindows(listing.id);
       }

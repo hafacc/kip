@@ -15,18 +15,7 @@ import {
   type DeletionRequest,
 } from "./types";
 
-// Leaving is one write, and a Cloud Function does the rest.
-//
-// It used to be a serial chain of writes from here — cancel every stay, delete
-// every place and photo, unfriend both sides, then the profile and the Auth
-// account. The profile went near the END of that chain, so a tab closed during
-// the slow early phases left an account that still had a profile, friends and
-// places, while its owner's stays were already cancelled and their friends had
-// watched them vanish. The reaper collects only accounts with NOTHING attached,
-// deliberately, so it skipped that account for good: the one thing that finished
-// it was the person coming back and pressing the button again.
-//
-// A trigger retries without them, which is the whole reason this moved.
+// One write; a trigger does the rest, and retries without the person here.
 export async function requestDeletion(uid: string): Promise<void> {
   const ref = doc(db(), "deletions", uid);
   try {

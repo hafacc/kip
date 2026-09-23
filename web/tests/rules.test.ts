@@ -85,6 +85,19 @@ async function seed(fill: (db: Firestore) => Promise<void>): Promise<void> {
   });
 }
 
+// `claimUsername`, shape for shape: the registry entry and the profile naming it
+// travel together, since the registry rule reads the profile after the commit.
+function claimHandle(db: Firestore, uid: string, handle: string): Promise<void> {
+  const batch = writeBatch(db);
+  batch.set(doc(db, "usernames", handle), { uid });
+  batch.set(
+    doc(db, "users", uid),
+    { username: handle, searchable: true },
+    { merge: true },
+  );
+  return batch.commit();
+}
+
 // EVERY date here is relative to the run. A literal doesn't just age — it quietly
 // changes what its test asserts, then fails one morning with nothing edited.
 function isoIn(days: number): string {
@@ -156,6 +169,7 @@ beforeEach(async () => {
 
 describe("portals", () => {
   it("owner can create their own portal", async () => {
+    await seed((db) => setDoc(doc(db, "users", OWNER), { displayName: "Owner" }));
     await assertSucceeds(setDoc(doc(authed(OWNER), "portals", "p1"), portal));
   });
 
@@ -610,11 +624,7 @@ describe("bookings via a share link", () => {
     start: isoIn(10),
     end: isoIn(14),
     status: "REQUESTED",
-    hostName: "Owner",
-    hostPhotoURL: null,
-    guestName: "Visitor",
-    guestPhotoURL: null,
-    createdAt: 0,
+    createdAt: serverTimestamp(),
   };
 
   beforeEach(async () => {
@@ -807,9 +817,7 @@ describe("users + usernames (get-not-query privacy)", () => {
   });
 
   it("can claim an unclaimed handle mapping to your own uid", async () => {
-    await assertSucceeds(
-      setDoc(doc(credentialed("u1"), "usernames", "freehandle"), { uid: "u1" }),
-    );
+    await assertSucceeds(claimHandle(credentialed("u1"), "u1", "freehandle"));
   });
 
   // A handle is permanent, so it needs an account someone can sign back into.
@@ -817,24 +825,18 @@ describe("users + usernames (get-not-query privacy)", () => {
   // `sign_in_provider`, which records how the session started and would refuse
   // an asker who attached an email from the browser their email opened in.
   it("a participant with no credential cannot claim one", async () => {
-    await assertFails(
-      setDoc(doc(authed("u1"), "usernames", "freehandle"), { uid: "u1" }),
-    );
+    await assertFails(claimHandle(authed("u1"), "u1", "freehandle"));
   });
 
   // A handle is permanent and never released, so an address nobody proved could
   // park good names for good — and kip's UI not offering passwords is no
   // protection, since the web API key is public.
   it("an unverified address cannot claim one", async () => {
-    await assertFails(
-      setDoc(doc(unverified("u1"), "usernames", "freehandle"), { uid: "u1" }),
-    );
+    await assertFails(claimHandle(unverified("u1"), "u1", "freehandle"));
   });
 
   it("a phone, which proves itself, can", async () => {
-    await assertSucceeds(
-      setDoc(doc(phoned("u1"), "usernames", "freehandle"), { uid: "u1" }),
-    );
+    await assertSucceeds(claimHandle(phoned("u1"), "u1", "freehandle"));
   });
 
   it("cannot claim a handle mapping to someone else's uid", async () => {
@@ -886,22 +888,14 @@ describe("users + usernames (get-not-query privacy)", () => {
   ];
   it("cannot claim any reserved handle", async () => {
     for (const handle of RESERVED) {
-      await assertFails(
-        setDoc(doc(authed("u1"), "usernames", handle), { uid: "u1" }),
-      );
+      await assertFails(claimHandle(credentialed("u1"), "u1", handle));
     }
   });
 
   it("cannot claim a malformed handle (bad chars / too short / leading digit)", async () => {
-    await assertFails(
-      setDoc(doc(authed("u1"), "usernames", "ab"), { uid: "u1" }),
-    );
-    await assertFails(
-      setDoc(doc(authed("u1"), "usernames", "1abc"), { uid: "u1" }),
-    );
-    await assertFails(
-      setDoc(doc(authed("u1"), "usernames", "Bad_Caps"), { uid: "u1" }),
-    );
+    await assertFails(claimHandle(credentialed("u1"), "u1", "ab"));
+    await assertFails(claimHandle(credentialed("u1"), "u1", "1abc"));
+    await assertFails(claimHandle(credentialed("u1"), "u1", "Bad_Caps"));
   });
 
   // Permanent, which is what makes going private reversible.
@@ -1866,9 +1860,7 @@ describe("bookings (field validation)", () => {
     windowId: "w-normal",
     start: isoIn(10),
     end: isoIn(14),
-    guestName: "Guest One",
-    hostName: "Owner One",
-    createdAt: 0,
+    createdAt: serverTimestamp(),
   };
 
   beforeEach(async () => {
@@ -1964,7 +1956,11 @@ describe("bookings (field validation)", () => {
       setDoc(doc(db, "bookings", "bk6"), { ...base, status: "REQUESTED" }),
     );
     await assertSucceeds(
-      updateDoc(doc(authed(GUEST), "bookings", "bk6"), { status: "CANCELLED" }),
+      updateDoc(doc(authed(GUEST), "bookings", "bk6"), {
+        status: "CANCELLED",
+        cancelledBy: GUEST,
+        cancelReason: "WITHDRAWN",
+      }),
     );
   });
 
@@ -2043,12 +2039,31 @@ describe("windows (a booked slot's dates are frozen)", () => {
   });
 
   it("the host can still release a booked slot (cancel)", async () => {
-    await assertSucceeds(
-      updateDoc(doc(authed(OWNER), "listings", "LW", "windows", "wb"), {
-        status: "OPEN",
-        bookingId: null,
+    await seed((db) =>
+      setDoc(doc(db, "bookings", "bw"), {
+        listingId: "LW",
+        ownerId: OWNER,
+        guestId: "wguest",
+        windowId: "wb",
+        start: isoIn(20),
+        end: isoIn(24),
+        status: "CONFIRMED",
+        cancelledBy: null,
+        cancelReason: null,
       }),
     );
+    const db = authed(OWNER);
+    const batch = writeBatch(db);
+    batch.update(doc(db, "bookings", "bw"), {
+      status: "CANCELLED",
+      cancelledBy: OWNER,
+      cancelReason: "STAY_CANCELLED",
+    });
+    batch.update(doc(db, "listings", "LW", "windows", "wb"), {
+      status: "OPEN",
+      bookingId: null,
+    });
+    await assertSucceeds(batch.commit());
   });
 });
 
@@ -2151,7 +2166,7 @@ describe("windows (guest field pinning)", () => {
     status: "CONFIRMED",
     cancelledBy: null,
     cancelReason: null,
-    createdAt: 0,
+    createdAt: serverTimestamp(),
   };
 
   it("a friend can claim an auto-accept window (OPEN -> BOOKED)", async () => {
@@ -2778,7 +2793,7 @@ describe("bookings (dates that have already gone)", () => {
       cancelledBy: null,
       cancelReason: null,
       hiddenBy: [],
-      createdAt: 0,
+      createdAt: serverTimestamp(),
     });
 
   it("cannot ask for a slot whose nights have passed", async () => {
@@ -3079,7 +3094,7 @@ describe("the calls the client really makes", () => {
     status: "CONFIRMED",
     cancelledBy: null,
     cancelReason: null,
-    createdAt: 0,
+    createdAt: serverTimestamp(),
   };
 
   beforeEach(async () => {
@@ -3448,3 +3463,589 @@ describe("feedback", () => {
   });
 });
 
+
+// Each of these was a write the rules accepted until they didn't: proved against
+// the emulator first, then closed.
+describe("portals keep their owner, scope and room", () => {
+  const MALLORY = "pmallory";
+  const VICTIM = "pvictim";
+  const own = { ...portal, ownerId: MALLORY, ownerName: "Mallory" };
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, "users", MALLORY), { displayName: "Mallory" });
+      await setDoc(doc(db, "users", VICTIM), { displayName: "Victim" });
+      await setDoc(doc(db, "users", OWNER), { displayName: "Owner" });
+      await setDoc(doc(db, "portals", "pm"), own);
+    });
+  });
+
+  // Then naming it as `portalId` reached a victim who is not searchable.
+  it("cannot be handed to someone else", async () => {
+    await assertFails(
+      updateDoc(doc(authed(MALLORY), "portals", "pm"), { ownerId: VICTIM }),
+    );
+    await assertFails(
+      setDoc(
+        doc(authed(MALLORY), "connectRequests", `${MALLORY}_${VICTIM}`),
+        { ...request, from: MALLORY, to: VICTIM, fromName: "Mallory", fromUsername: "", portalId: "pm" },
+      ),
+    );
+  });
+
+  it("cannot change scope or the room it names", async () => {
+    await assertFails(
+      updateDoc(doc(authed(MALLORY), "portals", "pm"), { scope: "USER" }),
+    );
+    await assertFails(
+      updateDoc(doc(authed(MALLORY), "portals", "pm"), { listingId: "L2" }),
+    );
+  });
+
+  // The visitor can't read the owner's profile, so they can't check this copy.
+  it("carries the owner's real name and photo, at birth and after", async () => {
+    await assertFails(
+      setDoc(doc(authed(MALLORY), "portals", "pm2"), {
+        ...own,
+        ownerName: "kip Support",
+      }),
+    );
+    await assertFails(
+      setDoc(doc(authed(MALLORY), "portals", "pm3"), {
+        ...own,
+        ownerPhotoURL: "https://example.com/pixel.gif",
+      }),
+    );
+    await assertFails(
+      updateDoc(doc(authed(MALLORY), "portals", "pm"), {
+        ownerName: "kip Support",
+      }),
+    );
+  });
+
+  // `propagateProfile` writes the profile first, then this.
+  it("a rename propagates once the profile carries it", async () => {
+    await seed((db) =>
+      setDoc(doc(db, "users", MALLORY), { displayName: "Mal", photoURL: null }),
+    );
+    await assertSucceeds(
+      setDoc(
+        doc(authed(MALLORY), "portals", "pm"),
+        { ownerName: "Mal", ownerPhotoURL: null },
+        { merge: true },
+      ),
+    );
+  });
+
+  // `publishListingPortal` and `publishSlotPortal`, shape for shape — the slot
+  // one against a held slot, whose status and holder must pass untouched.
+  it("publishing a room or a date link still goes", async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, "listings", "LM"), { ownerId: MALLORY, publicPortalId: null });
+      await setDoc(doc(db, "listings", "LM", "windows", "wm"), {
+        start: isoIn(10),
+        end: isoIn(14),
+        status: "BOOKED",
+        autoAccept: false,
+        details: "",
+        bookingId: "someone",
+        publicPortalId: null,
+      });
+    });
+    const db = authed(MALLORY);
+    const room = writeBatch(db);
+    room.set(doc(db, "portals", "pnew"), {
+      scope: "LISTING",
+      ownerId: MALLORY,
+      ownerName: "Mallory",
+      ownerPhotoURL: null,
+      createdAt: serverTimestamp(),
+      listingId: "LM",
+    });
+    room.update(doc(db, "listings", "LM"), { publicPortalId: "pnew" });
+    await assertSucceeds(room.commit());
+
+    const dates = writeBatch(db);
+    dates.set(doc(db, "portals", "pslot"), {
+      scope: "SLOT",
+      ownerId: MALLORY,
+      ownerName: "Mallory",
+      ownerPhotoURL: null,
+      createdAt: serverTimestamp(),
+      listings: slotPortal.listings,
+    });
+    dates.update(doc(db, "listings", "LM", "windows", "wm"), { publicPortalId: "pslot" });
+    await assertSucceeds(dates.commit());
+  });
+
+  // `propagateListing` rewrites the slot link's room copy.
+  it("a slot link's room copy can still be refreshed", async () => {
+    await seed((db) =>
+      setDoc(doc(db, "portals", "ps"), { ...slotPortal, ownerId: MALLORY, ownerName: "Mallory" }),
+    );
+    await assertSucceeds(
+      updateDoc(doc(authed(MALLORY), "portals", "ps"), {
+        listings: [{ ...slotPortal.listings[0], title: "Sunnier room" }],
+      }),
+    );
+  });
+});
+
+describe("a listing keeps its owner", () => {
+  beforeEach(async () => {
+    await seed((db) => setDoc(doc(db, "listings", "LO"), { ownerId: OWNER, title: "A" }));
+  });
+
+  it("cannot be given away", async () => {
+    await assertFails(
+      updateDoc(doc(authed(OWNER), "listings", "LO"), { ownerId: STRANGER }),
+    );
+  });
+
+  it("still edits", async () => {
+    await assertSucceeds(
+      updateDoc(doc(authed(OWNER), "listings", "LO"), { title: "B" }),
+    );
+  });
+});
+
+describe("a booking is born clean", () => {
+  const GUEST = "bcguest";
+  const ask = () => ({
+    listingId: "LBC",
+    ownerId: OWNER,
+    guestId: GUEST,
+    windowId: "wbc",
+    start: isoIn(10),
+    end: isoIn(14),
+    status: "REQUESTED",
+    cancelledBy: null,
+    cancelReason: null,
+    createdAt: serverTimestamp(),
+  });
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, "listings", "LBC"), { ownerId: OWNER });
+      await setDoc(doc(db, "users", OWNER, "friends", GUEST), { since: 0 });
+      await setDoc(doc(db, "listings", "LBC", "windows", "wbc"), {
+        start: isoIn(10),
+        end: isoIn(14),
+        status: "OPEN",
+        autoAccept: false,
+        details: "",
+        bookingId: null,
+      });
+    });
+  });
+
+  it("the client's own shape is accepted", async () => {
+    await assertSucceeds(addDoc(collection(authed(GUEST), "bookings"), ask()));
+  });
+
+  it("cannot be lodged already hidden from the host", async () => {
+    await assertFails(
+      addDoc(collection(authed(GUEST), "bookings"), { ...ask(), hiddenBy: [OWNER] }),
+    );
+  });
+
+  it("cannot be backdated", async () => {
+    await assertFails(
+      addDoc(collection(authed(GUEST), "bookings"), {
+        ...ask(),
+        createdAt: Timestamp.fromMillis(0),
+      }),
+    );
+  });
+
+  it("cannot carry fields a booking doesn't have", async () => {
+    await assertFails(
+      addDoc(collection(authed(GUEST), "bookings"), { ...ask(), guestName: "kip Support" }),
+    );
+  });
+});
+
+describe("a booking's status and who ended it", () => {
+  const GUEST = "bsguest";
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, "bookings", "bs1"), {
+        listingId: "LBS",
+        ownerId: OWNER,
+        guestId: GUEST,
+        windowId: "wbs",
+        start: isoIn(10),
+        end: isoIn(14),
+        status: "REQUESTED",
+        cancelledBy: null,
+        cancelReason: null,
+      });
+    });
+  });
+
+  it("status is one of the three", async () => {
+    await assertFails(
+      updateDoc(doc(authed(OWNER), "bookings", "bs1"), { status: "PAUSED" }),
+    );
+  });
+
+  it("a cancel says who and why", async () => {
+    await assertFails(
+      updateDoc(doc(authed(GUEST), "bookings", "bs1"), { status: "CANCELLED" }),
+    );
+    await assertFails(
+      updateDoc(doc(authed(GUEST), "bookings", "bs1"), {
+        status: "CANCELLED",
+        cancelledBy: GUEST,
+      }),
+    );
+    await assertFails(
+      updateDoc(doc(authed(GUEST), "bookings", "bs1"), {
+        status: "CANCELLED",
+        cancelledBy: GUEST,
+        cancelReason: "BORED",
+      }),
+    );
+    await assertSucceeds(
+      updateDoc(doc(authed(GUEST), "bookings", "bs1"), {
+        status: "CANCELLED",
+        cancelledBy: GUEST,
+        cancelReason: "WITHDRAWN",
+      }),
+    );
+  });
+});
+
+describe("one handle per account", () => {
+  const claimBatch = (db: Firestore, uid: string, handle: string) => {
+    const batch = writeBatch(db);
+    batch.set(doc(db, "usernames", handle), { uid });
+    batch.set(doc(db, "users", uid), { username: handle, searchable: true }, { merge: true });
+    return batch.commit();
+  };
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, "users", "h1"), { displayName: "H", username: "first_h" });
+      await setDoc(doc(db, "usernames", "first_h"), { uid: "h1" });
+      await setDoc(doc(db, "users", "h2"), { displayName: "H2" });
+    });
+  });
+
+  it("an account with a handle cannot park another", async () => {
+    await assertFails(
+      setDoc(doc(credentialed("h1"), "usernames", "second_h"), { uid: "h1" }),
+    );
+    await assertFails(claimBatch(credentialed("h1"), "h1", "second_h"));
+  });
+
+  it("a handle never changes once set", async () => {
+    await seed((db) => setDoc(doc(db, "usernames", "second_h"), { uid: "h1" }));
+    await assertFails(
+      setDoc(doc(authed("h1"), "users", "h1"), { username: "second_h" }, { merge: true }),
+    );
+  });
+
+  // Registry entries raced ahead of the profile used to be free: every one
+  // passed while the profile still read empty.
+  it("a registry entry alone is refused — it travels with the profile", async () => {
+    await assertFails(
+      setDoc(doc(credentialed("h2"), "usernames", "fresh_h"), { uid: "h2" }),
+    );
+  });
+
+  it("claimUsername's batch works, and so does retrying it", async () => {
+    await assertSucceeds(claimBatch(credentialed("h2"), "h2", "fresh_h"));
+    await assertSucceeds(claimBatch(credentialed("h2"), "h2", "fresh_h"));
+  });
+});
+
+describe("a slot moves with its booking", () => {
+  const GUEST = "smguest";
+  const base = {
+    listingId: "LSM",
+    ownerId: OWNER,
+    guestId: GUEST,
+    windowId: "wsm",
+    start: isoIn(10),
+    end: isoIn(14),
+    cancelledBy: null,
+    cancelReason: null,
+  };
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, "listings", "LSM"), { ownerId: OWNER });
+      await setDoc(doc(db, "listings", "LSM", "windows", "wsm"), {
+        start: isoIn(10),
+        end: isoIn(14),
+        status: "BOOKED",
+        autoAccept: false,
+        details: "",
+        bookingId: "smb",
+      });
+      await setDoc(doc(db, "bookings", "smb"), { ...base, status: "CONFIRMED" });
+      await setDoc(doc(db, "listings", "LSM", "windows", "wopen"), {
+        start: isoIn(20),
+        end: isoIn(24),
+        status: "OPEN",
+        autoAccept: false,
+        details: "",
+        bookingId: null,
+      });
+      await setDoc(doc(db, "bookings", "smask"), {
+        ...base,
+        windowId: "wopen",
+        start: isoIn(20),
+        end: isoIn(24),
+        status: "REQUESTED",
+      });
+    });
+  });
+
+  // Otherwise the stay stays CONFIRMED on a slot that reads free, and the next
+  // guest is confirmed onto the same nights.
+  it("the guest cannot free the slot and keep the stay", async () => {
+    await assertFails(
+      updateDoc(doc(authed(GUEST), "listings", "LSM", "windows", "wsm"), {
+        status: "OPEN",
+        bookingId: null,
+      }),
+    );
+  });
+
+  it("nor can the host", async () => {
+    await assertFails(
+      updateDoc(doc(authed(OWNER), "listings", "LSM", "windows", "wsm"), {
+        status: "OPEN",
+        bookingId: null,
+      }),
+    );
+  });
+
+  it("the host cannot mark a slot taken by an ask nobody confirmed", async () => {
+    await assertFails(
+      updateDoc(doc(authed(OWNER), "listings", "LSM", "windows", "wopen"), {
+        status: "BOOKED",
+        bookingId: "smask",
+      }),
+    );
+  });
+
+  it("a slot's status is OPEN or BOOKED", async () => {
+    await assertFails(
+      updateDoc(doc(authed(OWNER), "listings", "LSM", "windows", "wopen"), {
+        status: "HIDDEN",
+      }),
+    );
+  });
+});
+
+describe("connect requests carry only what's true", () => {
+  const SENDER = "crsender";
+  const TARGET = "crtarget";
+  const ask = {
+    from: SENDER,
+    to: TARGET,
+    fromName: "Sender",
+    fromUsername: "",
+    fromPhotoURL: null,
+    toName: "Target",
+    toUsername: "target_h",
+    toPhotoURL: null,
+    portalId: null,
+    createdAt: 0,
+  };
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, "users", SENDER), { displayName: "Sender" });
+      await setDoc(doc(db, "users", TARGET), {
+        displayName: "Target",
+        username: "target_h",
+        searchable: true,
+      });
+      await setDoc(doc(db, "portals", "someone_elses"), { ...portal, ownerId: "other" });
+      await setDoc(doc(db, "bookings", "unrelated"), {
+        listingId: "LX",
+        ownerId: "other",
+        guestId: SENDER,
+        windowId: "wx",
+        start: isoIn(1),
+        end: isoIn(3),
+        status: "CONFIRMED",
+      });
+    });
+  });
+
+  const send = (fields: Record<string, unknown>) =>
+    setDoc(doc(authed(SENDER), "connectRequests", `${SENDER}_${TARGET}`), {
+      ...ask,
+      ...fields,
+    });
+
+  it("a plain ask to a searchable person still goes", async () => {
+    await assertSucceeds(send({}));
+  });
+
+  it("the photo is the sender's real one", async () => {
+    await assertFails(send({ fromPhotoURL: "https://example.com/pixel.gif" }));
+  });
+
+  it("cannot claim it came through a link that isn't theirs", async () => {
+    await assertFails(send({ portalId: "someone_elses" }));
+  });
+
+  it("cannot claim a stay the two never shared", async () => {
+    await assertFails(send({ bookingId: "unrelated" }));
+  });
+});
+
+describe("your own friends list only holds people who asked", () => {
+  const ASKER = "flasker";
+  const ME = "flme";
+  const asked = {
+    from: ASKER,
+    to: ME,
+    fromName: "Asker",
+    fromUsername: "",
+    fromPhotoURL: null,
+    toName: "",
+    toUsername: "",
+    toPhotoURL: null,
+    portalId: null,
+    createdAt: 0,
+  };
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, "users", ME), { displayName: "Me" });
+      await setDoc(doc(db, "users", ASKER), { displayName: "Asker" });
+      await setDoc(doc(db, "connectRequests", `${ASKER}_${ME}`), asked);
+    });
+  });
+
+  it("cannot plant anyone without an ask", async () => {
+    await assertFails(
+      setDoc(doc(authed(ME), "users", ME, "friends", "rando"), {
+        displayName: "Rando",
+        username: "",
+        photoURL: null,
+        since: serverTimestamp(),
+      }),
+    );
+  });
+
+  it("cannot rename the asker on the way in", async () => {
+    await assertFails(
+      setDoc(doc(authed(ME), "users", ME, "friends", ASKER), {
+        displayName: "kip Support",
+        username: "",
+        photoURL: null,
+        since: serverTimestamp(),
+      }),
+    );
+  });
+
+  // acceptRequest, shape for shape.
+  it("the accept batch goes through", async () => {
+    const db = authed(ME);
+    const batch = writeBatch(db);
+    batch.set(doc(db, "users", ME, "friends", ASKER), {
+      username: "",
+      displayName: "Asker",
+      photoURL: null,
+      since: serverTimestamp(),
+    });
+    batch.set(doc(db, "users", ASKER, "friends", ME), {
+      username: "",
+      displayName: "Me",
+      photoURL: null,
+      since: serverTimestamp(),
+    });
+    batch.delete(doc(db, "connectRequests", `${ASKER}_${ME}`));
+    await assertSucceeds(batch.commit());
+  });
+});
+
+describe("an ask stops showing the host who asked once its dates pass", () => {
+  const HOST = "stalehost";
+  const GUEST = "staleguest";
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, "users", GUEST), { displayName: "Guest" });
+      await setDoc(doc(db, "bookings", "stale"), {
+        listingId: "LST",
+        ownerId: HOST,
+        guestId: GUEST,
+        windowId: "wst",
+        start: isoIn(-30),
+        end: isoIn(-25),
+        status: "REQUESTED",
+      });
+      await setDoc(doc(db, "users", GUEST, "knownBy", HOST), { bookingId: "stale" });
+    });
+  });
+
+  it("an ask whose nights are gone no longer lets the host look", async () => {
+    await assertFails(getDoc(doc(authed(HOST), "users", GUEST)));
+  });
+});
+
+describe("profiles and settings have no delete verb", () => {
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, "users", "nd1"), { displayName: "N" });
+      await setDoc(doc(db, "users", "nd1", "settings", "prefs"), { shareStaysWithFriends: false });
+    });
+  });
+
+  it("the owner cannot delete either", async () => {
+    await assertFails(deleteDoc(doc(authed("nd1"), "users", "nd1")));
+    await assertFails(deleteDoc(doc(authed("nd1"), "users", "nd1", "settings", "prefs")));
+  });
+});
+
+// A share-link ask is the costliest write in kip: every grant check it can make,
+// against links that all exist, lands on exactly Firestore's 10-lookup cap for a
+// single-document write. Anything added before the portal branch breaks this.
+describe("a share-link ask at the lookup ceiling", () => {
+  const VISITOR = "ceilvisitor";
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, "listings", "LCE"), { ownerId: OWNER, publicPortalId: "pl" });
+      await setDoc(doc(db, "listings", "LCE", "windows", "wce"), {
+        start: isoIn(10),
+        end: isoIn(14),
+        status: "OPEN",
+        autoAccept: false,
+        details: "",
+        bookingId: null,
+        publicPortalId: "pw",
+      });
+      await setDoc(doc(db, "users", OWNER, "settings", "prefs"), { profilePortalId: "pu" });
+      await setDoc(doc(db, "portals", "pw"), { ...portal, scope: "SLOT" });
+      await setDoc(doc(db, "portals", "pl"), { ...portal, listingId: "LCE" });
+      await setDoc(doc(db, "portals", "pu"), { ...portal, scope: "USER" });
+      await setDoc(doc(db, "portals", "pu", "grants", VISITOR), { expires: new Date() });
+    });
+  });
+
+  it("still passes through the profile link, the last one checked", async () => {
+    await assertSucceeds(
+      addDoc(collection(authed(VISITOR), "bookings"), {
+        listingId: "LCE",
+        ownerId: OWNER,
+        guestId: VISITOR,
+        windowId: "wce",
+        start: isoIn(10),
+        end: isoIn(14),
+        status: "REQUESTED",
+        cancelledBy: null,
+        cancelReason: null,
+        createdAt: serverTimestamp(),
+      }),
+    );
+  });
+});

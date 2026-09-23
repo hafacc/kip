@@ -237,6 +237,7 @@ function FilterSheet({
               </span>
               <select
                 className="h-11 shrink-0 rounded-xl border border-border bg-surface px-2 text-base outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
+                aria-label="Distance"
                 value={criteria.radiusKm}
                 onChange={(event) =>
                   update({ radiusKm: Number(event.target.value) })
@@ -261,6 +262,7 @@ function FilterSheet({
               <input
                 className={FIELD}
                 placeholder="City, address, or area"
+                aria-label="Location"
                 value={nearText}
                 onChange={(event) => setNearText(event.target.value)}
                 onKeyDown={(event) => {

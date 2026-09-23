@@ -4,15 +4,9 @@ import SiteFooter, { type DocRoute } from "./site-footer";
 import ThemeButton from "./theme-button";
 import Wordmark from "./wordmark";
 
-// The four written pages — About, Privacy, Terms, Help — share the portal's
-// chrome and a dozen element classes. They are the only long-text surfaces in
-// kip, and deliberately the only ones that set prose on the bare canvas: a card
-// here means controls and lists everywhere else, so a wall of one behind two
-// thousand words would read as a form.
-//
-// Nothing below touches the store, Firebase or a session. Twilio fetches the
-// Privacy and Terms URLs server-side during campaign registration, so every word
-// has to be in the exported HTML for a reader with no JavaScript.
+// Twilio fetches the Privacy and Terms URLs server-side during campaign
+// registration, so every word has to be in the exported HTML for a reader with
+// no JavaScript.
 
 export const link = "font-semibold text-accent-ink break-words";
 
@@ -34,8 +28,6 @@ export function List({ children }: { children: ReactNode }): ReactElement {
   );
 }
 
-// Used exactly twice across the four pages — the privacy summary and the SMS
-// disclosures — where lifting a block off the canvas is the point of it.
 export function Card({ children }: { children: ReactNode }): ReactElement {
   return (
     <div className="mt-6 rounded-3xl bg-surface p-5 shadow-card">

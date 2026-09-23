@@ -45,12 +45,22 @@ describe("what leaving does to a booking", () => {
     ).toBeNull();
   });
 
-  // The last day counts as ahead, matching `isExpired` on the web side: getting
-  // this boundary wrong cancels a visit someone is on.
-  it("still cancels a stay ending today", () => {
+  // `end` is the checkout day, so a stay ending today has had every night;
+  // cancelling it would tell the host a visit that happened was called off.
+  it("leaves a stay ending today alone", () => {
     expect(
       cancellationFor(
         booking({ status: "CONFIRMED", end: TODAY }),
+        LEAVER,
+        TODAY,
+      ),
+    ).toBeNull();
+  });
+
+  it("still cancels a stay with a night left", () => {
+    expect(
+      cancellationFor(
+        booking({ status: "CONFIRMED", end: "2026-08-23" }),
         LEAVER,
         TODAY,
       )?.cancelReason,

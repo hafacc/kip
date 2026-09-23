@@ -11,6 +11,7 @@ import {
   noticeForConnectRequest,
   noticeForNewBooking,
   type Notice,
+  photoFetchable,
   type NotifyKind,
   notifyFromForm,
   notifyStateFrom,
@@ -40,6 +41,7 @@ const booking = {
   start: "2026-08-14",
   end: "2026-08-19",
   ownerId: "host",
+  guestId: "guest",
   hostName: "Maya Rivera",
   hostPhotoURL: HOST_PHOTO as string | null,
   guestName: "Sam Okafor",
@@ -169,6 +171,22 @@ describe("a booking changing", () => {
     expect(notice?.kind).toBe("stayCancelled");
     expect(notice?.subject).toBe("Sam cancelled their stay");
     expect(notice?.body).toContain("free again");
+  });
+
+  // Every cancellation sentence names who did it, so a guess would send one to
+  // the person who actually did — silence is the lesser wrong.
+  it("tells nobody when it can't say who cancelled", () => {
+    for (const cancelledBy of [null, "someone-else"]) {
+      for (const before of [booking, confirmed]) {
+        expect(
+          noticeForBookingChange(
+            before,
+            { ...booking, status: "CANCELLED", cancelledBy },
+            BOOKING_ID,
+          ),
+        ).toBeNull();
+      }
+    }
   });
 
   it("says nothing about a status kip doesn't recognise", () => {
@@ -1051,5 +1069,32 @@ describe("the page a POST lands on", () => {
     expect(refused).not.toContain("<form");
     expect(refused).toContain("no longer works");
     expect(refused).toContain(`href="${SETTINGS}"`);
+  });
+});
+
+describe("which photos an email may fetch", () => {
+  const BUCKET = "kip-test.firebasestorage.app";
+
+  it("fetches our own bucket and Google's avatar host", () => {
+    expect(
+      photoFetchable(
+        `https://firebasestorage.googleapis.com/v0/b/${BUCKET}/o/avatars%2Fu?alt=media&token=t`,
+        BUCKET,
+      ),
+    ).toBe(true);
+    expect(photoFetchable(HOST_PHOTO, BUCKET)).toBe(true);
+  });
+
+  it("refuses anywhere else, including lookalikes and walking out of the bucket", () => {
+    for (const url of [
+      "https://example.com/me.jpg",
+      "http://lh3.googleusercontent.com/host",
+      "https://lh3.googleusercontent.com.evil.test/host",
+      "https://firebasestorage.googleapis.com/v0/b/other-bucket/o/x",
+      `https://firebasestorage.googleapis.com/v0/b/${BUCKET}/o/../../other/o/x`,
+      "not a url",
+    ]) {
+      expect(photoFetchable(url, BUCKET)).toBe(false);
+    }
   });
 });

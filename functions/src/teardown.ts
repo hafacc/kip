@@ -10,15 +10,9 @@ import { cancellationFor } from "./leaving";
 
 // Dismantling an account, with the Admin SDK, on a retry budget.
 //
-// This used to run in the browser as a serial chain of writes, and the profile
-// was deleted near the END of it — so a tab closed during the slow early phases
-// left an account with a profile, friends and places, whose owner's stays were
-// already cancelled. The reaper collects only accounts with NOTHING attached, so
-// it skipped exactly that account forever. A trigger finishes without the
-// person's participation, which is the whole reason this moved.
+// A trigger finishes without the person's participation.
 //
-// The phases are the same steps in the same order, and the order is not
-// cosmetic: the writes in `stays` and `friends` fire the notification triggers,
+// The order of the phases is not cosmetic: the writes in `stays` and `friends` fire the notification triggers,
 // and those read the leaver's profile to build their messages, so the profile
 // has to outlive them. Being admin removes one constraint the browser had —
 // nothing here is checked by rules — but it removes none of the ordering.
@@ -47,8 +41,7 @@ function db() {
   return getFirestore();
 }
 
-// UTC, matching `isExpired` on the web side — a stay is live through its last
-// day, and getting that boundary wrong cancels a visit someone is on.
+// UTC, since a server has no local day to use.
 function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -98,22 +91,20 @@ async function cancelStays(uid: string): Promise<void> {
     const { releasesSlot, ...update } = decided;
 
     const bookingRef = db().doc(`bookings/${bookingId}`);
-    const slot = releasesSlot
+    const slotRef = releasesSlot
       ? db().doc(`listings/${booking.listingId}/windows/${booking.windowId}`)
       : null;
 
-    const batch = db().batch();
-    batch.update(bookingRef, update);
-    if (slot) batch.update(slot, { status: "OPEN", bookingId: null });
-    try {
-      await batch.commit();
-    } catch (error) {
-      // The slot may be gone already — a host can delete one out from under a
-      // stay — and `update` on a missing document fails the whole batch. The
-      // booking still has to be cancelled, and there is then nothing to release.
-      if (!slot || (error as { code?: number }).code !== 5) throw error;
-      await bookingRef.update(update);
-    }
+    // The slot goes back to OPEN only while it still names THIS stay: it may be
+    // gone already — a host can delete one out from under a stay — or hold
+    // someone else's booking, and neither is the leaver's to release.
+    await db().runTransaction(async (tx) => {
+      const slot = slotRef ? await tx.get(slotRef) : null;
+      tx.update(bookingRef, update);
+      if (slotRef && slot?.data()?.bookingId === bookingId) {
+        tx.update(slotRef, { status: "OPEN", bookingId: null });
+      }
+    });
   }
 
   await dropPointers(uid, bookings);

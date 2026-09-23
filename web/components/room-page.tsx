@@ -10,7 +10,7 @@ import type { AvailabilityWindow, Booking, Listing } from "../utils/types";
 import Avatar from "./avatar";
 import BookingRow from "./booking-row";
 import CoverPhoto, { PhotoGallery } from "./cover-photo";
-import { useAction, useDialog } from "./dialog";
+import { useAction, useDialog, useFailure } from "./dialog";
 import PhotoStrip from "./photo-strip";
 import ShareLink from "./share-link";
 import SlotRow from "./slot-row";
@@ -625,6 +625,7 @@ function SlotSheet({
   } = useKip();
   const { confirm } = useDialog();
   const run = useAction();
+  const fail = useFailure();
   const [start, setStart] = useState(window.start);
   const [end, setEnd] = useState(window.end);
   const [details, setDetails] = useState(window.details);
@@ -678,12 +679,16 @@ function SlotSheet({
       });
       if (!ok) return;
     }
-    await updateWindow(listingId, window.id, {
-      start,
-      end,
-      details: details.trim(),
-    });
-    onClose();
+    try {
+      await updateWindow(listingId, window.id, {
+        start,
+        end,
+        details: details.trim(),
+      });
+      onClose();
+    } catch (error) {
+      fail(error, "Couldn't save those dates. Please try again.");
+    }
   }
 
   async function cancelSlot(): Promise<void> {

@@ -82,10 +82,6 @@ worker.addEventListener("fetch", (event) => {
         const hit = await caches.match(request);
         if (hit) return hit;
         const response = await fetch(request);
-        // Stored on `waitUntil`, never awaited before returning: the page is
-        // waiting on this response, and awaiting the write — a `keys()` scan
-        // among it — put the whole cache bookkeeping on the critical path of
-        // every asset a cold load fetches.
         if (response.ok) event.waitUntil(store(request, response.clone()));
         return response;
       })(),
@@ -94,11 +90,7 @@ worker.addEventListener("fetch", (event) => {
   }
 
   if (request.mode === "navigate") {
-    // Keyed on the PATH alone: a navigation's `request.url` carries the query
-    // and the fragment, so caching the request as it comes writes a portal token
-    // and a one-time sign-in code into a store with no expiry that any
-    // same-origin script can read. The document is the same either way, so one
-    // entry per path also means an offline `/portal/#anything` finds it.
+    // Keyed and stored without query or fragment: those carry capabilities.
     //
     // Trailing slash forced to match `trailingSlash`: online a server redirects
     // `/kip` to `/kip/` and offline nothing does, so the key written on the way
@@ -109,7 +101,10 @@ worker.addEventListener("fetch", (event) => {
       (async () => {
         try {
           const response = await fetch(request);
-          if (response.ok) event.waitUntil(store(shell, response.clone()));
+          if (response.ok) {
+            const copy = response.clone();
+            event.waitUntil(store(shell, new Response(copy.body, copy)));
+          }
           return response;
         } catch (offline) {
           // This path if it has been seen. Not the app's entry point as a

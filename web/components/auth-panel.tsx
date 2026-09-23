@@ -2,7 +2,6 @@
 
 import { type ReactElement, useRef, useState } from "react";
 import { FaGoogle } from "react-icons/fa";
-import { LuLoaderCircle } from "react-icons/lu";
 import { authErrorMessage } from "../utils/auth";
 import { useKip } from "../utils/store";
 import { useDialog } from "./dialog";
@@ -14,6 +13,7 @@ import ReachField, {
   reachError,
   sendReach,
 } from "./reach-field";
+import Busy from "./ui/busy";
 import Button from "./ui/button";
 
 // The door — the whole of it, since the same one-time link both makes an account
@@ -158,7 +158,7 @@ export default function AuthPanel({
           (reach.pending ? !codeReady(reach) : !reach.raw)
         }
       >
-        {busy ? <LuLoaderCircle className="animate-spin" /> : "Continue"}
+        {busy ? <Busy label="Continue" /> : "Continue"}
       </Button>
 
       {/* Under the button it stands in for, the same as every other surface
@@ -192,14 +192,9 @@ export default function AuthPanel({
       <div className="w-full max-w-sm rounded-3xl bg-surface p-6 text-left shadow-panel">
         {body}
       </div>
-      {/* The card's caption, and the height belongs to the slot rather than to
-          the copy: the notice's own two lines are reserved whether it or an
-          error is speaking, so a problem appearing, changing or clearing never
-          moves the card above it. The page is a centred column, so anything
-          that changes height here re-centres and shifts the door itself.
-
-          One line of error is a budget rather than a hope, pinned by
-          `tests/auth-copy.test.ts`. */}
+      {/* Two lines reserved whatever speaks: the page is a centred column, so
+          a height change here would shift the door. One line of error is
+          pinned by `tests/auth-copy.test.ts`. */}
       <p
         aria-live="polite"
         className={`max-w-sm min-h-10 text-sm leading-5 ${problem ? "text-danger" : "text-muted"}`}

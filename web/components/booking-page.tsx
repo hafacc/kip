@@ -16,7 +16,7 @@ import { useKip } from "../utils/store";
 import type { Booking, CancelReason } from "../utils/types";
 import Avatar from "./avatar";
 import CoverPhoto from "./cover-photo";
-import { useAction, useDialog } from "./dialog";
+import { useAction, useDialog, useFailure } from "./dialog";
 import Button from "./ui/button";
 import Chip, { type ChipTone } from "./ui/chip";
 import { Group, Row } from "./ui/list";
@@ -73,6 +73,7 @@ export default function BookingPage({ id }: { id: string }): ReactElement {
   } = useKip();
   const run = useAction();
   const { alert, confirm } = useDialog();
+  const fail = useFailure();
   const [busy, setBusy] = useState(false);
   // Neither subscription carries a stay you're only a spectator of, so a friend
   // arriving from a held slot has to fetch it. `looked` keeps the not-available
@@ -118,7 +119,7 @@ export default function BookingPage({ id }: { id: string }): ReactElement {
         });
       }
     } catch (error) {
-      console.error(error);
+      fail(error, "Couldn't confirm this stay. Please try again.");
     } finally {
       setBusy(false);
     }

@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactElement, useState } from "react";
+import { type ReactElement, useEffect, useRef, useState } from "react";
 import {
   LuChevronDown,
   LuDownload,
@@ -42,7 +42,7 @@ export default function AuthMenu(): ReactElement | null {
   const [open, setOpen] = useState(false);
   const [feedback, setFeedback] = useState(false);
 
-  const displayName = profile?.displayName ?? user?.displayName ?? email;
+  const name = profile?.displayName ?? user?.displayName ?? null;
   const photoURL = profile?.photoURL ?? user?.photoURL ?? null;
 
   async function doSignOut() {
@@ -61,30 +61,50 @@ export default function AuthMenu(): ReactElement | null {
     }
   }
 
-  // A visitor who has not typed a name has nothing to show here — no avatar, no
-  // profile. Once they have one they are a participant and the menu is theirs,
-  // minus the exit: see below.
-  // The app's own routes only. `/portal/` and `/continue/` render neither the
-  // nav stack nor Settings, and history writes are skipped by pathname there —
-  // so both destinations in this menu are dead taps. It used to be spared this
-  // by hiding from anonymous sessions; now that a named anonymous visitor is a
-  // participant, the gate has to name the reason directly.
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const items = () =>
+      Array.from(
+        menu.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [],
+      );
+    items()[0]?.focus();
+    function onKey(event: KeyboardEvent): void {
+      if (event.key === "Escape") {
+        setOpen(false);
+        trigger.current?.focus();
+      } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const all = items();
+        const at = all.indexOf(document.activeElement as HTMLElement);
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        all[(at + step + all.length) % all.length]?.focus();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  // portal/continue render neither the nav stack nor Settings, so every row
+  // would be a dead tap.
   if (
     typeof window !== "undefined" &&
     /\/(portal|continue)\/?$/.test(window.location.pathname)
   ) {
     return null;
   }
-  // Nameless sessions get no menu, and want none: they hold no profile, no ask
-  // and no friends, so leaving would swap one empty anonymous account for
-  // another — and the other two items here are a profile they don't have and
-  // Settings. Three near-dead controls is worse than no avatar.
-  if (!user || !displayName) return null;
+  // A nameless ANONYMOUS session gets no menu, and wants none: it holds no
+  // profile, no ask and no friends, so leaving would swap one empty anonymous
+  // account for another. A nameless account with a credential keeps it —
+  // Settings and the exit live only here, and the name sheet can be dismissed.
+  if (!user || (anonymous && !name)) return null;
 
   return (
     <div className="relative">
       <button
         type="button"
+        ref={trigger}
         onClick={() => setOpen((value) => !value)}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -92,16 +112,11 @@ export default function AuthMenu(): ReactElement | null {
         className="flex h-10 items-center gap-0.5 rounded-full pr-1 transition hover:opacity-80"
       >
         <Avatar
-          name={displayName ?? ""}
+          name={name ?? email ?? ""}
           photoURL={photoURL}
           className="h-9 w-9 text-sm shadow-soft"
         />
-        {/* An avatar on its own reads as decoration, which is how Settings and
-            sign-out end up looking absent — they live behind it. The chevron is
-            the only thing saying it opens something. */}
         <LuChevronDown className="shrink-0 text-muted" size={14} />
-        {/* The menu is shut by default, so a dot only inside it says nothing
-            until you have already gone looking. */}
         {unreadFeedback && !open ? (
           <span className="absolute right-5 top-0.5 size-2 rounded-full bg-accent ring-2 ring-bg" />
         ) : null}
@@ -114,9 +129,15 @@ export default function AuthMenu(): ReactElement | null {
             onClick={() => setOpen(false)}
             className="fixed inset-0 z-10 cursor-default"
           />
-          <div className="absolute right-0 z-20 mt-2 w-56 overflow-hidden rounded-2xl bg-surface p-1.5 shadow-panel">
+          <div
+            ref={menu}
+            role="menu"
+            aria-label="You"
+            className="absolute right-0 z-20 mt-2 w-56 overflow-hidden rounded-2xl bg-surface p-1.5 shadow-panel"
+          >
             <button
               type="button"
+              role="menuitem"
               onClick={() => {
                 if (user) navigate({ kind: "person", id: user.uid });
                 setOpen(false);
@@ -128,6 +149,7 @@ export default function AuthMenu(): ReactElement | null {
             </button>
             <button
               type="button"
+              role="menuitem"
               onClick={() => {
                 setView("settings");
                 setOpen(false);
@@ -143,6 +165,7 @@ export default function AuthMenu(): ReactElement | null {
             {admin ? (
               <button
                 type="button"
+                role="menuitem"
                 onClick={() => {
                   setView("feedback");
                   setOpen(false);
@@ -170,6 +193,7 @@ export default function AuthMenu(): ReactElement | null {
             {credentialed(doors, emailVerified) ? (
               <button
                 type="button"
+                role="menuitem"
                 onClick={() => {
                   setFeedback(true);
                   setOpen(false);
@@ -187,6 +211,7 @@ export default function AuthMenu(): ReactElement | null {
             {ready || byHand ? (
               <button
                 type="button"
+                role="menuitem"
                 onClick={async () => {
                   setOpen(false);
                   if (ready) await install();
@@ -212,6 +237,7 @@ export default function AuthMenu(): ReactElement | null {
                 way out of the menu at all. */}
             <button
               type="button"
+              role="menuitem"
               onClick={doSignOut}
               className="mt-1 flex h-11 w-full items-center gap-3 whitespace-nowrap rounded-xl border-t border-border px-3 text-[0.9375rem] font-semibold text-danger hover:bg-danger-soft"
             >

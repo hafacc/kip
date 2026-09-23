@@ -197,13 +197,20 @@ export async function propagateProfile(
   portalIds: readonly string[],
 ): Promise<void> {
   if (portalIds.length === 0) return;
+  // A stored id can outlive its portal (a revoke that cleared the doc but not
+  // the field), and a write to it would be a CREATE the rules refuse — failing
+  // the whole batch. Portals are public by id, so checking first costs no grant.
+  const snaps = await Promise.all(
+    portalIds.map((id) => getDoc(doc(db(), "portals", id))),
+  );
+  const live = snaps.filter((snap) => snap.exists());
+  if (live.length === 0) return;
   const batch = writeBatch(db());
-  for (const id of portalIds) {
-    batch.set(
-      doc(db(), "portals", id),
-      { ownerName: owner.displayName, ownerPhotoURL: owner.photoURL },
-      { merge: true },
-    );
+  for (const snap of live) {
+    batch.update(snap.ref, {
+      ownerName: owner.displayName,
+      ownerPhotoURL: owner.photoURL,
+    });
   }
   await batch.commit();
 }

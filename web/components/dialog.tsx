@@ -14,10 +14,6 @@ import {
 import Button from "./ui/button";
 import Sheet from "./ui/sheet";
 
-// In-app confirm/alert replacing the browser's confirm()/alert(). The async
-// API mirrors how a native action sheet (iOS) / dialog (Android) would be
-// awaited, and the UI is a bottom sheet on mobile, a centered card on desktop.
-
 type DialogTone = "default" | "danger";
 
 type ConfirmOptions = {
@@ -47,6 +43,21 @@ export function useDialog(): DialogContextValue {
   return ctx;
 }
 
+const FAILED = "Something went wrong. Please try again.";
+
+// Reports a caught failure as a dialog, for handlers that hold their own busy
+// state and so can't hand the whole action to `useAction`.
+export function useFailure(): (error: unknown, message?: string) => void {
+  const { alert } = useDialog();
+  return useCallback(
+    (error, message = FAILED) => {
+      console.error(error);
+      void alert({ title: "That didn't work", body: message });
+    },
+    [alert],
+  );
+}
+
 // Run a fire-and-forget async action (a booking confirm/cancel, an accept, a
 // delete) so a rules denial, offline timeout, or batch conflict surfaces as a
 // dialog instead of an unhandled rejection + a button that silently does nothing.
@@ -55,15 +66,12 @@ export function useAction(): (
   action: () => Promise<unknown>,
   message?: string,
 ) => void {
-  const { alert } = useDialog();
+  const fail = useFailure();
   return useCallback(
-    (action, message = "Something went wrong. Please try again.") => {
-      action().catch((error: unknown) => {
-        console.error(error);
-        void alert({ title: "That didn't work", body: message });
-      });
+    (action, message) => {
+      action().catch((error: unknown) => fail(error, message));
     },
-    [alert],
+    [fail],
   );
 }
 
@@ -104,11 +112,16 @@ export default function DialogProvider({
     });
   }, []);
 
-  // Enter confirms; Escape/backdrop dismissal is handled by the Sheet.
+  // Enter confirms unless focus is on a control, which answers Enter itself —
+  // otherwise Enter on a focused Cancel would confirm. Escape/backdrop
+  // dismissal is handled by the Sheet.
   useEffect(() => {
     if (!active) return;
     function onKey(event: KeyboardEvent): void {
-      if (event.key === "Enter") close(true);
+      if (event.key !== "Enter") return;
+      const focused = document.activeElement;
+      if (focused?.closest("button, a, input, textarea, select")) return;
+      close(true);
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
