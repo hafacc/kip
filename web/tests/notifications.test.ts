@@ -354,7 +354,7 @@ describe("whose photo the email carries", () => {
 
 describe("rendering an email", () => {
   const notice = noticeForNewBooking(booking, BOOKING_ID);
-  const ORIGIN = "https://hafaio.github.io/kip";
+  const ORIGIN = "https://hafa.cc/kip";
   const UNSUB =
     "https://us-central1-hafaio-kip-dev.cloudfunctions.net/unsubscribe?uid=host&kind=bookingRequested&key=k1";
   const withPhoto = renderEmail(notice, {
@@ -371,16 +371,16 @@ describe("rendering an email", () => {
   // The site is served under a base path, so a link that drops it 404s.
   it("joins the fragment path onto the origin, base path and all", () => {
     expect(linkTo(ORIGIN, "#/booking/bk_42")).toBe(
-      "https://hafaio.github.io/kip/#/booking/bk_42",
+      "https://hafa.cc/kip/#/booking/bk_42",
     );
-    expect(linkTo("https://hafaio.github.io/kip/", "#/friends")).toBe(
-      "https://hafaio.github.io/kip/#/friends",
+    expect(linkTo("https://hafa.cc/kip/", "#/friends")).toBe(
+      "https://hafa.cc/kip/#/friends",
     );
   });
 
   it("carries the link and the button in the HTML", () => {
     expect(withPhoto.html).toContain(
-      'href="https://hafaio.github.io/kip/#/booking/bk_42"',
+      'href="https://hafa.cc/kip/#/booking/bk_42"',
     );
     expect(withPhoto.html).toContain("Review the request");
   });
@@ -389,7 +389,7 @@ describe("rendering an email", () => {
   it("keeps a plain-text alternative that still links", () => {
     expect(withPhoto.text).toContain("Sam would like");
     expect(withPhoto.text).toContain(
-      "Review the request: https://hafaio.github.io/kip/#/booking/bk_42",
+      "Review the request: https://hafa.cc/kip/#/booking/bk_42",
     );
   });
 
@@ -458,7 +458,7 @@ describe("rendering an email", () => {
     );
     expect(connect.html).toContain("Priya Raman");
     expect(connect.html).toContain(
-      'href="https://hafaio.github.io/kip/#/friends"',
+      'href="https://hafa.cc/kip/#/friends"',
     );
     expect(connect.subject).toBe("Priya wants to connect on kip");
   });
@@ -497,7 +497,7 @@ const GIVEN = "Bartholomew";
 // Long enough that the subject must be shortened, short enough that cutting at
 // the first space would still have left the second part whole — which is the
 // shape the old cut got backwards.
-const TWO_PART_NAME = `${GIVEN}\u00a0${"Fitzwilliam".repeat(6)}`;
+const TWO_PART_NAME = `${GIVEN}\u00a0${"Fitzwilliam".repeat(7)}`;
 // Past that, and the whole thing after the first space no longer fits: the old
 // fallback then sent a truncated name and a link, saying nothing.
 const LONG_TWO_PART_NAME = `${GIVEN}\u00a0${"Fitzwilliam-Smythe".repeat(8)}`;
@@ -554,11 +554,11 @@ function everyNotice(name: string): Notice[] {
 }
 
 describe("what a text can carry", () => {
-  const ORIGIN = "https://hafaio.github.io/kip";
+  const ORIGIN = "https://hafa.cc/kip";
 
   it("says the one line the subject already is, and links to it", () => {
     expect(renderSms(noticeForNewBooking(booking, BOOKING_ID), ORIGIN)).toBe(
-      "Sam asked to stay https://hafaio.github.io/kip/#/booking/bk_42",
+      "Sam asked to stay https://hafa.cc/kip/#/booking/bk_42",
     );
   });
 
@@ -967,7 +967,7 @@ describe("what a posted form asks for", () => {
 });
 
 describe("the page a POST lands on", () => {
-  const SETTINGS = "https://hafaio.github.io/kip/#/settings";
+  const SETTINGS = "https://hafa.cc/kip/#/settings";
   const done = renderUnsubscribed("stayCancelled", SETTINGS);
 
   // "Unsubscribe" reads as "stop all of this", so the page has to say which one

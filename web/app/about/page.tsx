@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import type { ReactElement } from "react";
 import DocPage, { H2, link, P } from "../../components/doc-page";
-import { HAFAIO_URL, REPO_URL } from "../../utils/contact";
+import { HAFA_URL, REPO_URL } from "../../utils/contact";
 
 export const metadata: Metadata = {
   title: "About kip",
@@ -48,8 +48,8 @@ export default function AboutPage(): ReactElement {
       <H2>Who makes it</H2>
       <P>
         kip is a{" "}
-        <a className={link} href={HAFAIO_URL}>
-          hafa.io
+        <a className={link} href={HAFA_URL}>
+          hafa
         </a>{" "}
         project. It doesn't charge, doesn't show ads, and doesn't sell anything
         — including data. What kip knows about you and why is written down
@@ -66,7 +66,7 @@ export default function AboutPage(): ReactElement {
       <P>
         The code is open source under the MIT license:{" "}
         <a className={link} href={REPO_URL}>
-          github.com/hafaio/kip
+          github.com/hafacc/kip
         </a>
         . Every version of the app — and of these pages — is public in that
         repository's history.

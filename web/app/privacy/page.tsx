@@ -4,7 +4,7 @@ import type { ReactElement } from "react";
 import DocPage, { Card, H2, List, link, P } from "../../components/doc-page";
 import {
   CONTACT_EMAIL,
-  HAFAIO_URL,
+  HAFA_URL,
   ISSUES_URL,
   REPO_URL,
 } from "../../utils/contact";
@@ -22,8 +22,8 @@ export default function PrivacyPage(): ReactElement {
     <DocPage title="Privacy Policy" updated={UPDATED} route="/privacy/">
       <P>
         kip is a friends-only space-sharing app, made and run by{" "}
-        <a className={link} href={HAFAIO_URL}>
-          hafa.io
+        <a className={link} href={HAFA_URL}>
+          hafa
         </a>
         . kip collects the minimum it needs to work, shows it only to the people
         you choose, and sells nothing to anyone.
