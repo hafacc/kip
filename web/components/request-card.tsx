@@ -9,7 +9,7 @@ import type {
   Listing,
 } from "../utils/types";
 import Avatar from "./avatar";
-import { useAction, useDialog } from "./dialog";
+import { useAction, useDialog, useFailure } from "./dialog";
 import { useNameGate } from "./name-gate";
 import Button from "./ui/button";
 import Chip from "./ui/chip";
@@ -69,6 +69,7 @@ export default function RequestCard({
   const { confirm } = useDialog();
   const { runNamed } = useNameGate();
   const run = useAction();
+  const fail = useFailure();
   const [busy, setBusy] = useState(false);
   const viaLink = request.portalId !== null;
   // This card also sits ON the requester's page, where linking through would
@@ -89,7 +90,7 @@ export default function RequestCard({
     try {
       await runNamed(() => acceptRequest(request), "Accept");
     } catch (error) {
-      console.error(error);
+      fail(error, "Couldn't accept that request. Please try again.");
     } finally {
       setBusy(false);
     }
@@ -152,6 +153,9 @@ export default function RequestCard({
     setBusy(true);
     try {
       await declineRequest(request);
+    } catch (error) {
+      fail(error, "Couldn't decline that request. Please try again.");
+      return;
     } finally {
       setBusy(false);
     }

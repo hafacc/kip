@@ -46,11 +46,13 @@ import {
   firebaseConfigured,
   onListenerLost,
 } from "./firebase";
+import { endedWithin, STAY_SIGHT_DAYS } from "./format";
 import {
   setSearchable as fbSetSearchable,
   unfriend as fbUnfriend,
   fetchUserProfile,
   findUserByUsername,
+  healFriendEdges,
   updateProfileIdentity,
   watchFriends,
   watchOwnProfile,
@@ -138,7 +140,11 @@ import {
   SMS_CONSENT_VERSION,
   type View,
 } from "./types";
-import { createProfile, claimUsername as fbClaimUsername } from "./username";
+import {
+  createProfile,
+  claimUsername as fbClaimUsername,
+  normalizeUsername,
+} from "./username";
 
 type WindowMap = Readonly<Record<string, readonly AvailabilityWindow[]>>;
 
@@ -149,10 +155,7 @@ type ContextShape = {
   // screen is the last snapshot rather than the truth.
   listenersLost: boolean;
   user: User | null;
-  // Snapshots of the mutable `user` fields the app branches on — see their state
-  // declarations for why they can't be read off the object. Anonymous is a
-  // share-link ticket rather than an account, so it counts as signed out
-  // everywhere in the app.
+  // Snapshots of mutable `user` fields — see their state declarations.
   anonymous: boolean;
   emailVerified: boolean;
   // Whether this account operates kip, which draws exactly one menu row. False
@@ -182,7 +185,6 @@ type ContextShape = {
   // Self-healing — a late answer still opens the gate. Distinct from
   // `listenersLost`, which is data going stale AFTER it arrived.
   profileUnreachable: boolean;
-  // Gated on displayName only — a handle is optional and claimed from Settings.
   prefs: Prefs;
   friends: Friend[];
   incomingRequests: ConnectRequest[];
@@ -220,7 +222,6 @@ type ContextShape = {
   refreshBrowse: () => Promise<void>;
   refreshWindows: (listingId: string) => Promise<void>;
   signIn: () => Promise<{ sameAccount: boolean }>;
-  // Signs in, or makes an account if that address has none.
   signOut: (force?: boolean) => Promise<void>;
   // For the share-link page only, whose live reads need an identity to hang a
   // grant on. Never replaces a real session.
@@ -321,13 +322,20 @@ const EMPTY_SEARCHES: SavedSearch[] = [];
 const EMPTY_WINDOWS: WindowMap = {};
 
 // Applied at the two subscriptions rather than per list, so every surface
-// honours a hide without each one remembering to.
+// honours a hide without each one remembering to. Only a CANCELLED booking can
+// be hidden — the rules allow the hide only then — so a live stay carrying a
+// stray uid is still shown rather than vanishing while it binds someone.
 function shownTo(
   uid: string,
   onChange: (bookings: Booking[]) => void,
 ): (bookings: Booking[]) => void {
   return (bookings) =>
-    onChange(bookings.filter((booking) => !booking.hiddenBy.includes(uid)));
+    onChange(
+      bookings.filter(
+        (booking) =>
+          booking.status !== "CANCELLED" || !booking.hiddenBy.includes(uid),
+      ),
+    );
 }
 
 const HOME_SCREEN: Screen = { kind: "tab", tab: "home" };
@@ -494,9 +502,7 @@ function replaceEntry(stack: readonly Screen[], depth = historyDepth()): void {
   if (!routable()) return;
   window.history.replaceState(
     // Carrying the scroll, because a replace changes what this entry POINTS AT
-    // and not where the reader is standing in it. Defaulting to 0 meant any
-    // in-place rewrite silently forgot the position, so coming back to the entry
-    // later landed at the top of a list the reader had scrolled deep into.
+    // and not where the reader is standing in it.
     entryState(stack, depth, historyScroll()),
     "",
     screenHash(stack[stack.length - 1]),
@@ -528,6 +534,8 @@ export function KipProvider({ children }: { children: ReactNode }) {
   // The uid whose teardown this session has actually SEEN, so the document
   // going away can be told from never having been there.
   const leaving = useRef<string | null>(null);
+  // The uid `deletionReady` was last reset for.
+  const deletionFor = useRef<string | null>(null);
   // Firebase restores a session asynchronously, so this stops the gate flashing
   // the sign-in screen at someone already signed in.
   const [authReady, setAuthReady] = useState(false);
@@ -675,12 +683,19 @@ export function KipProvider({ children }: { children: ReactNode }) {
       if (reattachTimer.current !== null) return;
       const decision = decideReattach(reattachState.current, Date.now());
       if (decision.verdict === "giveUp") {
-        // Only here, not on each loss: this arrives once per incident and the
-        // losses behind it are already collapsed into one retry budget.
-        recordDebugEvent("listeners-lost", {
-          spent: reattachState.current.spent,
-          ...clientState(),
-        });
+        reattachState.current = decision.next;
+        // Once per incident: listeners attached after giving up (a new place's
+        // windows, say) can still be lost, and each would otherwise log again.
+        if (decision.announce) {
+          recordDebugEvent("listeners-lost", {
+            spent: decision.next.spent,
+            ...clientState(),
+          });
+        }
+        // Never cleared by a later re-attach: listeners report only their
+        // failures here, and the snapshot a re-attached one delivers first may
+        // come from cache, so nothing proves the data is live again. The notice
+        // offers a reload, which does.
         setListenersLost(true);
       } else {
         reattachState.current = decision.next;
@@ -767,8 +782,7 @@ export function KipProvider({ children }: { children: ReactNode }) {
   }, [configured, admin, prefs.feedbackSeenAt]);
 
   // Feeds `gateStep` and mirrors the result into state. The listener is the
-  // only source: with metadata events it either answers or raises the SDK's
-  // offline verdict, both bounded by the SDK's own timers — no second read.
+  // only source; `watchOwnProfile` settles a cached absence itself.
   // biome-ignore lint/correctness/useExhaustiveDependencies: `generation` is unread on purpose — bumping it is how a lost listener gets re-attached.
   useEffect(() => {
     if (!configured || !user) {
@@ -823,10 +837,18 @@ export function KipProvider({ children }: { children: ReactNode }) {
       setDeletion(null);
       setDeletionReady(true);
       leaving.current = null;
+      deletionFor.current = null;
       return;
     }
     const uid = user.uid;
-    setDeletionReady(false);
+    // Only for a new session. A `generation` re-attach for the same one must
+    // not shut this: `page.tsx` splashes while it is false, which would blank
+    // an open sheet and any half-typed form — the profile gate's rule too.
+    if (deletionFor.current !== uid) {
+      deletionFor.current = uid;
+      setDeletion(null);
+      setDeletionReady(false);
+    }
     const stop = watchDeletion(
       uid,
       (request) => {
@@ -842,9 +864,8 @@ export function KipProvider({ children }: { children: ReactNode }) {
           leaving.current = request.failed ? null : uid;
         } else if (leaving.current === uid) {
           // The document is deleted last, after the Auth account it belongs to,
-          // so this is the ending: the session is signed in as somebody who no
-          // longer exists. `force`, because an account with no credential has
-          // just been destroyed on purpose.
+          // so this is the ending. Straight to Firebase, since `signOut`'s guard
+          // would refuse an account destroyed on purpose.
           leaving.current = null;
           fbSignOut(auth()).catch((error) => console.error("signOut", error));
         }
@@ -918,7 +939,12 @@ export function KipProvider({ children }: { children: ReactNode }) {
   // Fetched, not live: the working set is small and this sidesteps dynamic
   // multi-collection listeners.
   const friendUidsKey = friends.map((friend) => friend.uid).join(",");
+  // Each fetch takes a ticket, and only the newest may land: an older one
+  // finishing late would otherwise overwrite a newer friend set, or fill in the
+  // last session's places after a sign-out.
+  const browseTicket = useRef(0);
   const refreshBrowse = useCallback(async () => {
+    const ticket = ++browseTicket.current;
     if (!configured || !user) {
       setFriendListings(EMPTY_LISTINGS);
       setFriendWindows(EMPTY_WINDOWS);
@@ -934,6 +960,7 @@ export function KipProvider({ children }: { children: ReactNode }) {
     const windowLists = await Promise.all(
       listings.map((listing) => fetchWindows(listing.id)),
     );
+    if (ticket !== browseTicket.current) return;
     const windows: Record<string, readonly AvailabilityWindow[]> = {};
     listings.forEach((listing, index) => {
       windows[listing.id] = windowLists[index];
@@ -951,7 +978,9 @@ export function KipProvider({ children }: { children: ReactNode }) {
 
   // One room's dates, for the screen that just changed them.
   const refreshWindows = useCallback(async (listingId: string) => {
+    const asked = auth().currentUser?.uid;
     const windows = await fetchWindows(listingId);
+    if (auth().currentUser?.uid !== asked) return;
     setFriendWindows((prev) => ({ ...prev, [listingId]: windows }));
   }, []);
 
@@ -988,11 +1017,36 @@ export function KipProvider({ children }: { children: ReactNode }) {
       .catch((error) => console.error("fetchListing", error));
   }, [configured, user, missingListingsKey]);
 
-  // Here rather than at confirm time because neither confirm path can write it:
-  // the rules still see the booking as REQUESTED inside both commits. Keyed on
-  // the stays still missing one, NOT on `trips` — that array is fresh on every
-  // snapshot, so keying on it rewrote every stay the user ever had.
+  // Once per stay per page load; the rules can't see the booking as CONFIRMED
+  // inside either confirm commit.
   const claimedStays = useRef(new Set<string>());
+
+  // A texted code or a credential that already belongs to another account signs
+  // INTO it without signing out, so the uid changes under a live session and
+  // every reset keyed on `!user` is skipped. Reset during render, not in an
+  // effect: an effect would let this render's effects act for the new uid on
+  // the old account's trips and bookings first.
+  const sessionUid = user?.uid ?? null;
+  const [stateUid, setStateUid] = useState<string | null>(null);
+  if (sessionUid !== stateUid) {
+    setStateUid(sessionUid);
+    setFriends(EMPTY_FRIENDS);
+    setIncoming(EMPTY_REQUESTS);
+    setOutgoing(EMPTY_REQUESTS);
+    setMyListings(EMPTY_LISTINGS);
+    setMyWindows(EMPTY_WINDOWS);
+    setFriendListings(EMPTY_LISTINGS);
+    setFriendWindows(EMPTY_WINDOWS);
+    setTrips(EMPTY_BOOKINGS);
+    setTripListings(EMPTY_LISTINGS);
+    setIncomingBookings(EMPTY_BOOKINGS);
+    setCounterparts(EMPTY_PROFILES);
+    setPrefsState(DEFAULT_PREFS);
+    setSavedSearches(EMPTY_SEARCHES);
+    setAdmin(false);
+    setUnreadFeedback(false);
+    claimedStays.current = new Set();
+  }
   const unclaimedStaysKey = trips
     .filter(
       (trip) =>
@@ -1020,30 +1074,31 @@ export function KipProvider({ children }: { children: ReactNode }) {
     ...friends.map((friend) => friend.uid),
     ...counterparts.map((person) => person.uid),
   ]);
-  const counterpartStays = new Map<string, string>();
+  // The stay that best authorises each lookup, straight from `stayPermitsSight`:
+  // a REQUESTED one for the HOST only — being asked is not consent to be looked
+  // up, but confirming a stranger called "Someone" is the moment identity
+  // matters most — then a CONFIRMED one either way, but only while its checkout
+  // is recent enough for the rule to still honour it. Anything else would be a
+  // pointer the rules refuse, leaving the name unresolved.
+  const counterpartStays = new Map<string, { id: string; rank: number }>();
   for (const booking of [...trips, ...incomingBookings]) {
     const otherUid =
       booking.guestId === user?.uid ? booking.ownerId : booking.guestId;
     if (knownUids.has(otherUid)) continue;
-    // Which stays authorise a lookup, straight from `stayPermitsSight`: a
-    // CONFIRMED one either way, and a REQUESTED one for the HOST only — being
-    // asked is not consent to be looked up, but confirming a stranger called
-    // "Someone" is the moment identity matters most.
-    //
-    // Only the confirmed half used to qualify, so every pending ask rendered as
-    // "Someone" — the fallback for a name that could not be read. Rarely seen
-    // when askers were friends; now it is every share-link request there is.
-    const usable =
-      booking.status === "CONFIRMED" ||
-      (booking.status === "REQUESTED" && booking.ownerId === user?.uid);
-    if (usable && !counterpartStays.get(otherUid)) {
-      counterpartStays.set(otherUid, booking.id);
-    } else if (!counterpartStays.has(otherUid)) {
-      counterpartStays.set(otherUid, "");
+    const rank =
+      booking.status === "REQUESTED" && booking.ownerId === user?.uid
+        ? 2
+        : booking.status === "CONFIRMED" &&
+            endedWithin(booking.end, STAY_SIGHT_DAYS)
+          ? 1
+          : 0;
+    const held = counterpartStays.get(otherUid);
+    if (!held || rank > held.rank) {
+      counterpartStays.set(otherUid, { id: rank > 0 ? booking.id : "", rank });
     }
   }
   const counterpartsKey = [...counterpartStays]
-    .map(([otherUid, bookingId]) => `${otherUid}:${bookingId}`)
+    .map(([otherUid, stay]) => `${otherUid}:${stay.id}`)
     .sort()
     .join(",");
   useEffect(() => {
@@ -1166,12 +1221,27 @@ export function KipProvider({ children }: { children: ReactNode }) {
     );
   }, []);
 
-  // A handle already taken fails on the registry's owner-only update rule.
-  const claimUsername = useCallback(async (username: string) => {
-    const current = auth().currentUser;
-    if (!current) throw new Error("not signed in");
-    await fbClaimUsername(current.uid, username);
-  }, []);
+  // A handle already taken fails on the registry's owner-only update rule. Your
+  // friends' copies of you then still hold the old handle (usually ''), so they
+  // are healed here — after the claim, since the edge rule reads the committed
+  // profile. The claim has landed either way, so a failed heal is only logged.
+  const claimUsername = useCallback(
+    async (username: string) => {
+      const current = auth().currentUser;
+      if (!current) throw new Error("not signed in");
+      await fbClaimUsername(current.uid, username);
+      await healFriendEdges(
+        current.uid,
+        {
+          displayName: profileRef.current?.displayName ?? "",
+          photoURL: profileRef.current?.photoURL ?? null,
+          username: normalizeUsername(username),
+        },
+        friends.map((friend) => friend.uid),
+      ).catch((error) => console.error("healFriendEdges", error));
+    },
+    [friends],
+  );
 
   const setSearchable = useCallback(
     (searchable: boolean) => {
@@ -1188,7 +1258,7 @@ export function KipProvider({ children }: { children: ReactNode }) {
     async (uid: string, displayName: string, photoURL: string | null) => {
       await updateProfileIdentity(
         uid,
-        { displayName, photoURL },
+        { displayName, photoURL, username: profileRef.current?.username ?? "" },
         friends.map((friend) => friend.uid),
       );
       await propagateProfile(

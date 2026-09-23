@@ -12,11 +12,19 @@ import {
 import type { AvailabilityWindow, Listing } from "../utils/types";
 
 const DAY = 86_400_000;
+// A clock for `createdAt`/`lastSeenAt` only, which are compared with each other
+// and never with the calendar.
 const NOW = 1_800_000_000_000;
 
-// Far enough out that these never age past `isExpired` as the calendar moves.
+// Slot dates are compared against the REAL today by `isExpired`, so they count
+// from it — a fixed base would let every fixture expire as the calendar walks
+// past it. Days ahead, in local time like `todayIso`.
 function isoIn(days: number): string {
-  return new Date(NOW + days * DAY).toISOString().slice(0, 10);
+  const when = new Date();
+  when.setDate(when.getDate() + days);
+  const month = String(when.getMonth() + 1).padStart(2, "0");
+  const day = String(when.getDate()).padStart(2, "0");
+  return `${when.getFullYear()}-${month}-${day}`;
 }
 
 function listing(id: string, extra: Partial<Listing> = {}): Listing {

@@ -8,7 +8,7 @@
 // `messages.ts` is a file: the walk around it needs the Admin SDK and a live
 // account to exercise, this needs neither.
 
-export type CancelReason = "STAY_CANCELLED" | "WITHDRAWN" | "SLOT_CANCELLED";
+import type { CancelReason } from "./messages";
 
 export type Cancellation = {
   readonly status: "CANCELLED";
@@ -22,9 +22,10 @@ export type Cancellation = {
 
 // Null means leave it exactly as it is. Two ways to get one, and they are
 // different facts: a booking that is already CANCELLED has said everything it
-// is going to say, and a stay whose last day has passed is a record of a visit
+// is going to say, and a stay whose nights are all spent is a record of a visit
 // that happened — "cancelled" is the wrong word for it, and writing it would
-// tell someone their trip was called off after they had been on it.
+// tell someone their trip was called off after they had been on it. `end` is
+// the checkout day, so a stay ending today has already had every night.
 export function cancellationFor(
   booking: {
     status?: unknown;
@@ -36,7 +37,7 @@ export function cancellationFor(
   cutoff: string,
 ): Cancellation | null {
   if (booking.status === "CANCELLED") return null;
-  if (typeof booking.end !== "string" || booking.end < cutoff) return null;
+  if (typeof booking.end !== "string" || booking.end <= cutoff) return null;
 
   const confirmed = booking.status === "CONFIRMED";
   return {

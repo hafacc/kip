@@ -83,11 +83,8 @@ service cloud.firestore {
         && get(prefs).data.get('shareStaysWithFriends', false) == true;
     }
 
-    // The null guard has to test null, not '': an OPEN slot carries bookingId
-    // PRESENT and null (the create rule pins it that way), and get(k, default)
-    // substitutes only for an ABSENT key. Guarding on '' let null through to
-    // path interpolation, which is a Null value error — denying by throwing
-    // rather than by answering, so no clause after this one would ever run.
+    // get(k, default) substitutes only for an ABSENT key; OPEN slots carry
+    // bookingId: null.
     function slotHolder(bookingId) {
       return bookingId != null && exists(/databases/$(database)/documents/bookings/$(bookingId))
         ? get(/databases/$(database)/documents/bookings/$(bookingId)).data.guestId
@@ -136,22 +133,75 @@ service cloud.firestore {
     // The mirror image, checked from the slot's side: the booking travels with
     // the flip, so it is not committed yet and only getAfter can see it.
     function bookingArrivingWith(bookingId, listingId, windowId) {
-      return bookingId != ''
-        && getAfter(/databases/$(database)/documents/bookings/$(bookingId)).data.guestId == request.auth.uid
+      return bookingConfirmedOnto(bookingId, listingId, windowId)
+        && getAfter(/databases/$(database)/documents/bookings/$(bookingId)).data.guestId == request.auth.uid;
+    }
+
+    // Whoever marks a slot taken, the stay taking it must be CONFIRMED for this
+    // slot once the commit lands — the host's confirm included.
+    function bookingConfirmedOnto(bookingId, listingId, windowId) {
+      return bookingId != null
+        && bookingId != ''
         && getAfter(/databases/$(database)/documents/bookings/$(bookingId)).data.status == 'CONFIRMED'
         && getAfter(/databases/$(database)/documents/bookings/$(bookingId)).data.listingId == listingId
         && getAfter(/databases/$(database)/documents/bookings/$(bookingId)).data.windowId == windowId;
     }
 
+    // Freeing a held slot ends the stay in the same commit, or the stay stays
+    // CONFIRMED on nights the slot now offers to someone else. A booking that
+    // is already gone has nothing left to end.
+    function stayEndedWith(bookingId) {
+      return bookingId == null
+        || bookingId == ''
+        || !existsAfter(/databases/$(database)/documents/bookings/$(bookingId))
+        || getAfter(/databases/$(database)/documents/bookings/$(bookingId)).data.status == 'CANCELLED';
+    }
+
     // Called from create AND update: a request must not outlive the route that
     // put it there. The stay route is the only one open to a share-link guest and
     // their host, who are neither searchable to nor linked by each other.
+    //
+    // A named link or stay must hold even when the recipient is searchable and
+    // needed neither: the card says "via your link" or "you stayed together".
     function requestRouteOpen(request_) {
-      return get(/databases/$(database)/documents/users/$(request_.to)).data.get('searchable', false) == true
-        || (request_.get('portalId', null) != null
-            && exists(/databases/$(database)/documents/portals/$(request_.portalId))
-            && get(/databases/$(database)/documents/portals/$(request_.portalId)).data.ownerId == request_.to)
-        || bookingJoins(request_.get('bookingId', ''), request_.from, request_.to);
+      let portalId = request_.get('portalId', null);
+      let bookingId = request_.get('bookingId', null);
+      let viaLink = portalId != null && portalId != '';
+      let viaStay = bookingId != null && bookingId != '';
+      return (!viaLink
+              || (exists(/databases/$(database)/documents/portals/$(portalId))
+                  && get(/databases/$(database)/documents/portals/$(portalId)).data.ownerId == request_.to))
+        && (!viaStay || bookingJoins(bookingId, request_.from, request_.to))
+        && (viaLink
+            || viaStay
+            || get(/databases/$(database)/documents/users/$(request_.to)).data.get('searchable', false) == true);
+    }
+
+    // The recipient can't read the sender's profile to check these, and they go
+    // into an email.
+    function senderIsWriter(request_) {
+      let profile = get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+      return request_.fromName == profile.get('displayName', '')
+          && request_.fromUsername == profile.get('username', '')
+          && request_.get('fromPhotoURL', null) == profile.get('photoURL', null);
+    }
+
+    // A friend in your OWN list comes from their ask, named as they named
+    // themselves — which the request create pinned to their real profile.
+    function edgeMatchesAsker(edge, askId) {
+      let ask = get(/databases/$(database)/documents/connectRequests/$(askId)).data;
+      return exists(/databases/$(database)/documents/connectRequests/$(askId))
+          && edge.get('displayName', '') == ask.get('fromName', '')
+          && edge.get('username', '') == ask.get('fromUsername', '')
+          && edge.get('photoURL', null) == ask.get('fromPhotoURL', null);
+    }
+
+    // A share-link visitor can't read the owner's profile, so the copy on the
+    // link is pinned to it.
+    function portalOwnerCopyTrue(portal) {
+      let profile = get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+      return portal.get('ownerName', '') == profile.get('displayName', '')
+          && portal.get('ownerPhotoURL', null) == profile.get('photoURL', null);
     }
 
     function bookingJoins(bookingId, first, second) {
@@ -179,7 +229,8 @@ service cloud.firestore {
             && endedWithin(stay.end, staySightDays()))
           || (stay.status == 'REQUESTED'
               && stay.ownerId == readerUid
-              && stay.guestId == subjectUid)
+              && stay.guestId == subjectUid
+              && stillCurrent(stay.end))
         );
     }
 
@@ -231,17 +282,19 @@ service cloud.firestore {
       // simply never written here" was a client habit, not a rule — a crafted
       // one could park an address or a number in a document friends can read,
       // which is the single promise this schema makes loudest.
-      allow write: if isSignedIn() && request.auth.uid == userId
+      // getAfter, because a claim writes the registry entry in the same batch.
+      // A handle is set once: an account that could swap it could walk through
+      // the registry parking one name after another.
+      allow create, update: if isSignedIn() && request.auth.uid == userId
         && request.resource.data.keys().hasOnly(['username', 'displayName', 'photoURL', 'searchable', 'createdAt'])
         && (!('username' in request.resource.data)
-            || get(/databases/$(database)/documents/usernames/$(request.resource.data.username)).data.uid == userId)
+            || getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.username)).data.uid == userId)
+        && (resource == null
+            || resource.data.get('username', '') == ''
+            || request.resource.data.get('username', '') == resource.data.username)
         && (request.resource.data.get('searchable', false) == false
             || request.resource.data.get('username', '') != '');
-      // No delete verb at all, for anyone. Leaving is a request now — see
-      // `deletions` below — and the teardown runs with the Admin SDK, which
-      // rules don't apply to. A client that could still delete its own profile
-      // could do it WITHOUT asking for the teardown, which is the half-dismantled
-      // account this whole change exists to stop producing.
+      // Leaving goes through `deletions`; the Admin SDK removes profiles.
 
       // `smsStopped` is the sender's word that a CARRIER is refusing this
       // number, and the text-check trigger acts only while it stands — refusing
@@ -259,7 +312,7 @@ service cloud.firestore {
       // block stood — including the switch that clears it.
       match /settings/{doc} {
         allow read: if isSignedIn() && request.auth.uid == userId;
-        allow write: if isSignedIn() && request.auth.uid == userId
+        allow create, update: if isSignedIn() && request.auth.uid == userId
           && (request.resource.data.get('smsStopped', false) == false
               || (resource != null
                   && resource.data.get('smsStopped', false) == true));
@@ -287,10 +340,12 @@ service cloud.firestore {
       match /friends/{friendId} {
         allow read: if isSignedIn()
           && (request.auth.uid == userId || request.auth.uid == friendId);
-        // The second clause is the accept step: the accepter writes the sender's
-        // edge, authorised by the pending request named `${sender}_${accepter}`.
+        // Both clauses are the accept step: the accepter writes their own edge
+        // and the sender's, each authorised by the pending request named
+        // `${sender}_${accepter}`.
         allow create: if isSignedIn()
-          && (request.auth.uid == userId
+          && ((request.auth.uid == userId
+               && edgeMatchesAsker(request.resource.data, friendId + '_' + userId))
               || (request.auth.uid == friendId
                   && exists(/databases/$(database)/documents/connectRequests/$(userId + '_' + friendId))
                   && edgeMatchesWriter(request.resource.data)));
@@ -318,10 +373,15 @@ service cloud.firestore {
       // ACCOUNT holds and repopulates on every token mint; `sign_in_provider`
       // reports how this SESSION started and never changes, so it would refuse
       // someone who asked anonymously and attached an email from another browser.
+      //
+      // One per account: the profile must name this handle once the commit
+      // lands (claimUsername writes both in one batch), and a profile's handle
+      // never changes once set.
       allow create: if isSignedIn()
         && hasCredential()
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.keys().hasOnly(['uid'])
+        && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('username', '') == handle
         && handle.matches('^[a-z][a-z0-9_]{2,19}$')
         && !(handle in ['admin', 'kip', 'support', 'help', 'root', 'system', 'about', 'settings']);
       allow update: if isSignedIn()
@@ -335,15 +395,10 @@ service cloud.firestore {
     match /connectRequests/{requestId} {
       allow read: if isSignedIn()
         && (request.auth.uid == resource.data.from || request.auth.uid == resource.data.to);
-      // The sender's name and handle go into the recipient's inbox and their
-      // email, and the recipient can't read the sender's profile to check them.
       allow create: if isSignedIn()
         && request.auth.uid == request.resource.data.from
         && requestId == request.resource.data.from + '_' + request.resource.data.to
-        && request.resource.data.fromName
-           == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('displayName', '')
-        && request.resource.data.fromUsername
-           == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('username', '')
+        && senderIsWriter(request.resource.data)
         && requestRouteOpen(request.resource.data);
       // Re-asking overwrites the same doc, so it must face the same checks —
       // otherwise a revoked link's `portalId` stays rewritable.
@@ -351,10 +406,7 @@ service cloud.firestore {
         && request.auth.uid == resource.data.from
         && request.resource.data.from == resource.data.from
         && request.resource.data.to == resource.data.to
-        && request.resource.data.fromName
-           == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('displayName', '')
-        && request.resource.data.fromUsername
-           == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('username', '')
+        && senderIsWriter(request.resource.data)
         && requestRouteOpen(request.resource.data);
       allow delete: if isSignedIn()
         && (request.auth.uid == resource.data.from || request.auth.uid == resource.data.to);
@@ -377,7 +429,10 @@ service cloud.firestore {
       allow create: if isSignedIn()
         && hasCredential()
         && request.auth.uid == request.resource.data.ownerId;
-      allow update, delete: if isSignedIn() && request.auth.uid == resource.data.ownerId;
+      allow update: if isSignedIn()
+        && request.auth.uid == resource.data.ownerId
+        && request.resource.data.ownerId == resource.data.ownerId;
+      allow delete: if isSignedIn() && request.auth.uid == resource.data.ownerId;
 
       // Self-issued by the guest, because neither confirm path can write it:
       // rules see committed state, so the booking isn't CONFIRMED yet inside
@@ -426,20 +481,31 @@ service cloud.firestore {
                           && request.resource.data.end == resource.data.end))
                   && (stillCurrent(resource.data.end)
                       || (request.resource.data.start == resource.data.start
-                          && request.resource.data.end == resource.data.end)))
+                          && request.resource.data.end == resource.data.end))
+                  // Taking and freeing a slot each travel with the booking's
+                  // own transition — confirm, or cancel.
+                  && request.resource.data.status in ['OPEN', 'BOOKED']
+                  && (request.resource.data.status != 'BOOKED'
+                      || (resource.data.status == 'BOOKED'
+                          && request.resource.data.get('bookingId', null) == resource.data.get('bookingId', null))
+                      || bookingConfirmedOnto(request.resource.data.get('bookingId', null), listingId, windowId))
+                  && (resource.data.status != 'BOOKED'
+                      || request.resource.data.status == 'BOOKED'
+                      || stayEndedWith(resource.data.get('bookingId', null))))
               // A friend claims an auto-accept slot. hasOnly pins every other
-              // field, including ones added later; enumerated equality didn't.
+              // field, including ones added later.
               || (isFriendOf(listingOwner(listingId))
                   && resource.data.autoAccept == true
                   && resource.data.status == 'OPEN'
                   && request.resource.data.status == 'BOOKED'
                   && bookingArrivingWith(request.resource.data.get('bookingId', ''), listingId, windowId)
                   && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'bookingId']))
-              // The booker releases it on cancel.
+              // The booker releases it, only together with cancelling the stay.
               || (slotHolder(resource.data.get('bookingId', null)) == request.auth.uid
                   && resource.data.status == 'BOOKED'
                   && request.resource.data.status == 'OPEN'
                   && request.resource.data.get('bookingId', null) == null
+                  && stayEndedWith(resource.data.bookingId)
                   && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'bookingId'])));
       }
     }
@@ -458,9 +524,14 @@ service cloud.firestore {
                 && guestSharesStays(resource.data.guestId)));
       // One way to ask, whoever is asking; only the authorisation differs. A
       // share-link visitor can never instant-book — a link is not friendship.
-      // No names are carried, so there is nothing here to pin but the stamps.
+      // No names are carried, so there is nothing here to pin but the key set
+      // and the stamps — all free, which matters: a share-link ask already
+      // spends exactly the 10 lookups a single-document write is allowed.
       allow create: if isSignedIn()
         && request.auth.uid == request.resource.data.guestId
+        && request.resource.data.keys().hasOnly(['listingId', 'ownerId', 'guestId', 'windowId', 'start', 'end', 'status', 'cancelledBy', 'cancelReason', 'hiddenBy', 'createdAt'])
+        && request.resource.data.get('hiddenBy', []) == []
+        && request.resource.data.createdAt == request.time
         && request.resource.data.ownerId == listingOwner(request.resource.data.listingId)
         && bookingMatchesOpenSlot(request.resource.data)
         && request.resource.data.get('cancelledBy', null) == null
@@ -476,17 +547,22 @@ service cloud.firestore {
         );
       // The transition graph, not just the fields: CANCELLED is an ending,
       // CONFIRMED comes only from REQUESTED, and REQUESTED is a birth state
-      // nothing returns to. Cancelling stamps who and why, and you may only stamp
-      // yourself — a trigger can't see who wrote, and the email depends on it.
+      // nothing returns to. Every cancel stamps who and why, and you may only
+      // stamp yourself — a trigger can't see who wrote, and the email depends on
+      // it. Nothing else touches the stamps.
       allow update: if isSignedIn()
         && (request.auth.uid == resource.data.guestId || request.auth.uid == resource.data.ownerId)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'cancelledBy', 'cancelReason'])
         && resource.data.status != 'CANCELLED'
+        && request.resource.data.status in ['CONFIRMED', 'CANCELLED']
         && (request.resource.data.status != 'CONFIRMED'
             || resource.data.status == 'REQUESTED')
-        && request.resource.data.status != 'REQUESTED'
-        && (request.resource.data.get('cancelledBy', null) == null
-            || request.resource.data.cancelledBy == request.auth.uid)
+        && (request.resource.data.status == 'CANCELLED'
+            ? (request.resource.data.get('cancelledBy', null) == request.auth.uid
+               && request.resource.data.get('cancelReason', null)
+                  in ['DECLINED', 'WITHDRAWN', 'SLOT_MOVED', 'SLOT_CANCELLED', 'STAY_CANCELLED'])
+            : (request.resource.data.get('cancelledBy', null) == resource.data.get('cancelledBy', null)
+               && request.resource.data.get('cancelReason', null) == resource.data.get('cancelReason', null)))
         && (request.auth.uid == resource.data.ownerId
             || request.resource.data.status == 'CANCELLED')
         && (request.resource.data.status != 'CONFIRMED'
@@ -510,8 +586,20 @@ service cloud.firestore {
     match /portals/{portalId} {
       allow get: if true;
       allow list: if false;
-      allow create: if isSignedIn() && request.auth.uid == request.resource.data.ownerId;
-      allow update, delete: if isSignedIn() && request.auth.uid == resource.data.ownerId;
+      // Owner, scope and room are fixed at birth: a link handed to someone else
+      // would open a connect route to a person who never shared one. A SLOT
+      // link's `listings` room copy stays unpinned — rules can't check a list of
+      // maps, and it only ever describes the owner's own place to a visitor.
+      allow create: if isSignedIn()
+        && request.auth.uid == request.resource.data.ownerId
+        && request.resource.data.scope in ['USER', 'LISTING', 'SLOT']
+        && portalOwnerCopyTrue(request.resource.data);
+      allow update: if isSignedIn()
+        && request.auth.uid == resource.data.ownerId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownerName', 'ownerPhotoURL', 'listings'])
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['ownerName', 'ownerPhotoURL'])
+            || portalOwnerCopyTrue(request.resource.data));
+      allow delete: if isSignedIn() && request.auth.uid == resource.data.ownerId;
 
       match /grants/{accountId} {
         allow get: if isSignedIn() && request.auth.uid == accountId;

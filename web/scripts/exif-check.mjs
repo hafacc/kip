@@ -142,6 +142,7 @@ async function browser() {
     ],
     { stdio: "ignore" },
   );
+  process.on("exit", () => chrome?.kill());
   await new Promise((r) => setTimeout(r, 5000));
   const targets = await (await fetch("http://127.0.0.1:9337/json/list")).json();
   const ws = new WebSocket(targets.find((t) => t.type === "page").webSocketDebuggerUrl);

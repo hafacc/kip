@@ -328,6 +328,8 @@ export default function PhotoStrip({
             onClick={() => fileInput.current?.click()}
             disabled={busy}
             title="Add photos"
+            aria-label="Add photos"
+            aria-busy={busy || undefined}
             className={`grid h-24 w-24 shrink-0 place-items-center rounded-2xl border border-dashed transition disabled:opacity-50 ${
               dropping
                 ? "border-accent bg-surface text-accent-ink"

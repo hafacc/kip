@@ -99,12 +99,6 @@ export function TopBar(): ReactElement {
   );
 }
 
-// Mobile: a floating dock inset from the screen edges. Rounded, translucent with
-// a blur, raised by a soft shadow over a hairline border — the one border kept
-// on a floating surface, because a translucent dock over a photo has nothing
-// else to separate it from what it sits on; the active tab is wrapped in a soft accent
-// pill and count badges float over the icon. Content pads its bottom by ~96px so
-// the dock never covers it.
 export function FloatingDock(): ReactElement {
   const { view, setView } = useKip();
   const items = useNavItems();
@@ -118,7 +112,11 @@ export function FloatingDock(): ReactElement {
             key={item.view}
             type="button"
             onClick={() => setView(item.view)}
-            aria-label={item.label}
+            aria-label={
+              item.badge > 0
+                ? `${item.label}, ${item.badge} waiting`
+                : item.label
+            }
             aria-current={active ? "page" : undefined}
             className={`flex min-w-[3.25rem] flex-col items-center gap-0.5 rounded-2xl py-1 text-[0.625rem] font-semibold transition ${
               active ? "text-accent-ink" : "text-faint"

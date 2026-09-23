@@ -41,12 +41,7 @@ export default function CodeInput({
   busy?: boolean;
 }): ReactElement {
   const field = useRef<HTMLInputElement>(null);
-  // Seeded from `autoFocus` rather than starting false: React focuses the node
-  // itself during commit, which does NOT go through the `onFocus` handler, so a
-  // field that opens focused drew no ring at all — six identical empty boxes
-  // with nothing saying which one the next digit lands in. Probed in a browser,
-  // where `document.activeElement` was already the input and every box still
-  // read `border-border`.
+  // Seeded from autoFocus: React's autoFocus doesn't fire onFocus.
   const [focused, setFocused] = useState(autoFocus);
 
   useEffect(() => {
@@ -91,13 +86,7 @@ export default function CodeInput({
         autoFocus={autoFocus}
         aria-label="6-digit code"
         aria-invalid={invalid || undefined}
-        // Deliberately NO `maxLength`: the browser applies it to the RAW value
-        // before any handler runs, so it truncates a paste by CHARACTERS and
-        // this field then strips digits out of the remains. Measured in Chrome:
-        // "429-103" arrives as "429-10" and loses its last digit, and a pasted
-        // "Your kip code is 429103" arrives as "Your k" and leaves the field
-        // empty. Both are what someone actually pastes. The slice below is the
-        // real bound, and it counts the digits it keeps.
+        // No maxLength: it truncates a paste before non-digits are stripped.
         //
         // Frozen while a code is in flight, or the race is: submit starts on the
         // sixth digit, nothing on screen has changed yet, so a backspace and a

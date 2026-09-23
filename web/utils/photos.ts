@@ -10,9 +10,6 @@ import { firebaseConfigured, storage } from "./firebase";
 
 import type { ListingPhoto } from "./types";
 
-// Readers never reach Storage rules — they follow the URL — because cross-service
-// rules allow only two Firestore lookups per request, which can't express the
-// six-way listing gate. The Firestore listing read is the gate instead.
 export const MAX_PHOTOS = 8;
 
 // Re-encoding also drops EXIF, and a GPS tag on a photo of someone's home is not

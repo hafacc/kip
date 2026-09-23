@@ -136,7 +136,6 @@ function Splash(): ReactElement {
   );
 }
 
-// Person resolves to a first name; every other detail screen has a fixed label.
 function useScreenTitle(screen: Screen): string {
   const { user, friends } = useKip();
   switch (screen.kind) {
@@ -183,10 +182,7 @@ export default function Page(): ReactElement {
   }
 
   // The screen's identity, not the object, which is rebuilt on every render.
-  // A room's `windowId` is deliberately NOT part of it: it names a sheet OVER
-  // the room rather than a different screen, so counting it meant opening a slot
-  // scrolled the page under the sheet back to the top, and closing it did so
-  // again — losing the host's place in their own calendar on every tap.
+  // windowId excluded: a slot is a sheet over the room and must not reset scroll.
   const screenKey = `${screen.kind}:${"id" in screen ? screen.id : ""}:${
     screen.kind === "tab" ? screen.tab : ""
   }`;
@@ -255,12 +251,10 @@ export default function Page(): ReactElement {
       <Splash />
     );
 
-  // The wordmark stands in for the title only where the title IS the app.
   const isHome = screen.kind === "tab" && screen.tab === "home";
 
   return (
     <div className="flex min-h-dvh flex-col">
-      {/* Mobile top bar: clean canvas, back + title (or wordmark on Home) + avatar */}
       <header className="flex h-14 items-center gap-2 px-4 md:hidden">
         {canGoBack ? (
           <IconButton label="Back" onClick={back} className="-ml-2">

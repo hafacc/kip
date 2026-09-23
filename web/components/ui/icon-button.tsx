@@ -2,11 +2,6 @@
 
 import type { ButtonHTMLAttributes, ReactElement, ReactNode } from "react";
 
-// A round 44px icon button. `label` drives both the tooltip and the accessible
-// name, since the visible content is just an icon. ghost is the default quiet
-// control; surface is a raised white circle (header/detail back + share);
-// success/danger tint on hover for a quiet destructive action — clearing a
-// location filter, turning off a share link.
 type IconButtonVariant = "ghost" | "surface" | "danger" | "success";
 
 const VARIANTS: Record<IconButtonVariant, string> = {

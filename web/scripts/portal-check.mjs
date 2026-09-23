@@ -28,8 +28,12 @@ const FIRESTORE = "http://127.0.0.1:8080";
 // writes into a namespace the app never reads, and every link reads as dead.
 const PROJECT = "hafaio-kip-dev";
 const DOCS = `${FIRESTORE}/v1/projects/${PROJECT}/databases/(default)/documents`;
-const TOKEN = "portal-check-token";
-const HOST = "host-portal-check";
+// Per run: the emulator keeps its data for as long as it is up, so a fixed host
+// would find the booking an EARLIER run left behind and pass on it.
+const RUN = Date.now();
+const TOKEN = `portal-check-token-${RUN}`;
+const HOST = `host-portal-check-${RUN}`;
+const LISTING = `portal-check-listing-${RUN}`;
 
 const failures = [];
 function expect(what, ok, detail = "") {
@@ -72,7 +76,7 @@ async function seed() {
     ownerPhotoURL: { nullValue: null },
     createdAt: ts("2026-08-01T00:00:00Z"),
   });
-  await put(`listings/portal-check-listing`, {
+  await put(`listings/${LISTING}`, {
     ownerId: str(HOST),
     title: str("The spare room"),
   location: {
@@ -93,7 +97,7 @@ async function seed() {
   // Far enough out that `isExpired` can never age the fixture into a failure —
   // the same trap `isoIn` exists to avoid in the rules suite.
   const year = new Date().getUTCFullYear() + 1;
-  await put(`listings/portal-check-listing/windows/w1`, {
+  await put(`listings/${LISTING}/windows/w1`, {
     start: str(`${year}-10-01`),
     end: str(`${year}-10-05`),
     status: str("OPEN"),
@@ -129,6 +133,7 @@ async function browser() {
     ],
     { stdio: "ignore" },
   );
+  process.on("exit", () => chrome?.kill());
   await new Promise((r) => setTimeout(r, 5000));
   const targets = await (await fetch("http://127.0.0.1:9333/json/list")).json();
   const ws = new WebSocket(
@@ -137,8 +142,18 @@ async function browser() {
   await new Promise((r) => (ws.onopen = r));
   let id = 0;
   const waiting = new Map();
+  // Page-level events, not an in-page hook: `app/error.tsx` catches a render
+  // throw before any hook installed after navigation could see it.
+  const thrown = [];
   ws.onmessage = (event) => {
     const message = JSON.parse(event.data);
+    if (message.method === "Runtime.exceptionThrown") {
+      const detail = message.params?.exceptionDetails;
+      thrown.push(detail?.exception?.description ?? detail?.text ?? "?");
+    }
+    if (message.method === "Runtime.consoleAPICalled" && message.params?.type === "error") {
+      thrown.push((message.params.args ?? []).map((a) => a.description ?? a.value).join(" | "));
+    }
     if (message.id && waiting.has(message.id)) {
       waiting.get(message.id)(message.result ?? message.error);
       waiting.delete(message.id);
@@ -153,6 +168,7 @@ async function browser() {
   await send("Runtime.enable");
   return {
     send,
+    thrown,
     evaluate: async (expression) =>
       (
         await send("Runtime.evaluate", {
@@ -175,16 +191,11 @@ const page = await (async () => {
 })();
 
 console.log("share link resolves");
-await page.send("Page.navigate", { url: `${APP}/portal/#${TOKEN}` });
-await new Promise((r) => setTimeout(r, 1200));
-await page.evaluate(`
-  window.__errs = [];
-  const orig = console.error;
-  console.error = (...a) => { window.__errs.push(a.map(x => x && x.code ? x.code + " :: " + x.message : String(x)).join(" | ")); orig(...a); };
-`);
-await new Promise((r) => setTimeout(r, 8000));
-const logged = await page.evaluate("window.__errs");
-if (logged?.length) console.log("  console:", JSON.stringify(logged));
+await page.go(`${APP}/portal/#${TOKEN}`, 9200);
+function reportThrown() {
+  if (page.thrown.length) console.log("  threw:", page.thrown.splice(0).join("\n         ").slice(0, 1200));
+}
+reportThrown();
 const shown = await page.evaluate("document.body.innerText");
 expect("does not report the link as inactive", !shown.includes("isn't active"), shown.slice(0, 90));
 expect("names the host", shown.includes("Sam Host"));
@@ -230,9 +241,10 @@ const sent = await page.evaluate(`
   if (submit.disabled) return "submit disabled with a valid name";
   submit.click();
   await new Promise(r => setTimeout(r, 10000));
-  return JSON.stringify({ errs: window.__errs, tail: document.body.innerText.slice(-260) });
+  return JSON.stringify({ tail: document.body.innerText.slice(-260) });
 })()
 `);
+reportThrown();
 expect("the submit went through", !String(sent).startsWith("no ") && !String(sent).includes("disabled"), String(sent).slice(0, 120));
 
 // The point of the whole flow: a real REQUESTED booking against the host's slot,
@@ -266,7 +278,7 @@ async function query(collectionId, field, value) {
 
 const bookings = await query("bookings", "ownerId", HOST);
 const booking = bookings[0]?.fields;
-expect("a request reached the host", Boolean(booking), JSON.stringify(bookings).slice(0, 140));
+expect("exactly one request reached the host", bookings.length === 1, JSON.stringify(bookings).slice(0, 140));
 expect(
   "it is REQUESTED, never confirmed from a link",
   booking?.status?.stringValue === "REQUESTED",
@@ -293,10 +305,8 @@ expect(
 );
 
 console.log("\nthe field routes on what was typed, not on the mode");
-// The Segmented only sets the keyboard and the autofill hint: a NUMBER typed
-// while it reads Email must still be recognised, because being in the "wrong"
-// mode can never be the thing that decides. instead: type a US number into the email-mode
-// input and confirm the form accepts it rather than calling it invalid.
+// A number typed while the field reads Email must still be accepted: the mode
+// sets the keyboard, not the verdict.
 await page.go(`${APP}/portal/#${TOKEN}`);
 const typedNumber = await page.evaluate(`
 (async () => {
@@ -329,9 +339,7 @@ expect(
   String(typedNumber).slice(0, 200),
 );
 
-// In a finally, or a thrown expectation leaves a headless Chrome running and a
-// profile directory behind for the next run to inherit.
-process.on("exit", () => chrome?.kill());
+reportThrown();
 if (failures.length) {
   console.log(`\n${failures.length} failed`);
   process.exit(1);

@@ -9,7 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { LuChevronRight, LuLoaderCircle, LuX } from "react-icons/lu";
+import { LuChevronRight, LuX } from "react-icons/lu";
 import {
   authErrorMessage,
   EMAIL_DOOR,
@@ -47,6 +47,7 @@ import ReachField, {
   reachError,
   sendReach,
 } from "./reach-field";
+import Busy from "./ui/busy";
 import Button from "./ui/button";
 import Chip from "./ui/chip";
 import FieldNote from "./ui/field-note";
@@ -422,14 +423,11 @@ function DoorsSection(): ReactElement {
                 setAddress(event.target.value);
               }}
               placeholder="you@example.com"
+              aria-label="Email"
             />
             <div className="flex flex-col">
               <Button type="submit" size="lg" disabled={busy || !address}>
-                {busy ? (
-                  <LuLoaderCircle className="animate-spin" />
-                ) : (
-                  "Send the link"
-                )}
+                {busy ? <Busy label="Send the link" /> : "Send the link"}
               </Button>
               <Problem message={error} />
             </div>
@@ -467,7 +465,9 @@ function DoorsSection(): ReactElement {
               }
             >
               {busy ? (
-                <LuLoaderCircle className="animate-spin" />
+                <Busy
+                  label={reach.pending ? "Add the number" : "Text me a code"}
+                />
               ) : reach.pending ? (
                 "Add the number"
               ) : (
@@ -988,11 +988,7 @@ function NotificationsSection(): ReactElement | null {
                   onClick={runCheck}
                   disabled={checking}
                 >
-                  {checking ? (
-                    <LuLoaderCircle className="animate-spin" />
-                  ) : (
-                    "Check now"
-                  )}
+                  {checking ? <Busy label="Check now" /> : "Check now"}
                 </Button>
                 {checkedStillBlocked ? (
                   <span>kip tried a text; the block is still there.</span>

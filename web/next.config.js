@@ -21,8 +21,8 @@ execFileSync(
   },
 );
 
-// Published via GitHub Pages. NEXT_PUBLIC_BASE_PATH is set by the deploy
-// workflow to /<repo-name>; change it here if a custom domain is used.
+// Set by the deploy workflow to /<repo>; the org's custom domain still serves
+// each repo under that path.
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
 export default {

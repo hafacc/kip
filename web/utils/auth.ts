@@ -73,16 +73,21 @@ export async function googleSignIn(): Promise<{ sameAccount: boolean }> {
       return { sameAccount: linked.user.uid === wasUid };
     } catch (error) {
       if (!alreadyRegistered(error)) throw error;
+      // The Google account already has a kip account. The credential rides on
+      // the error, as the phone door's does — and a second popup, opened after
+      // an await, is outside the tap and gets blocked by the browser.
+      const credential = GoogleAuthProvider.credentialFromError(
+        error as AuthError,
+      );
+      if (credential) {
+        const signedIn = await signInWithCredential(auth(), credential);
+        return { sameAccount: signedIn.user.uid === wasUid };
+      }
     }
   }
   const signedIn = await signInWithPopup(auth(), new GoogleAuthProvider());
   return { sameAccount: signedIn.user.uid === wasUid };
 }
-
-// Passwords are retired. An address that already has one is reached by the same
-// one-time link as any other — `signInWithEmailLink` lands on the existing
-// account — so nothing is stranded and the reset flow, with its own screen and
-// its own careful non-enumeration notice, left the product with it.
 
 // The doors an account actually has, as Settings lists them. Email-link sign-in
 // rides on the Email/Password provider, so its id is `password` however little
@@ -194,11 +199,6 @@ export function authErrorMessage(error: unknown): string {
   }
 }
 
-// Everything `/continue/` needs, carried in the continue URL's QUERY — not the
-// fragment kip uses everywhere else. That is forced rather than chosen: kip does
-// not author this link, Firebase builds it around its own action handler, and a
-// fragment does not survive that redirect.
-//
 // What rides here is worth being plain about: an ID token is a BEARER
 // CREDENTIAL, accepted by Firestore's REST API as that account for up to an
 // hour — not inert residue. The address it is mailed to was typed by an

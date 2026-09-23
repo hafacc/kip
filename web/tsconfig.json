@@ -19,7 +19,7 @@
     // be named here. Only `bun` is: `next-env.d.ts` already references next,
     // which reaches react and react-dom, but nothing references bun-types, and
     // without it the three `bun:test` imports fail to resolve. `node` rides
-    // along as a bun-types dependency; naming it keeps `scripts/seed.ts`'s
+    // along as a bun-types dependency; naming it keeps the scripts'
     // `process`/`Buffer` independent of that.
     "types": ["bun", "node"],
     "plugins": [{ "name": "next" }]

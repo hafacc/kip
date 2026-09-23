@@ -14,20 +14,7 @@ import Button from "./ui/button";
 import FieldNote from "./ui/field-note";
 import { Mark } from "./wordmark";
 
-// A teardown that has given up, which is the state this screen used to have no
-// answer for at all: it renders ahead of every other gate, so a document nobody
-// could clear locked the account out of kip on every device, permanently, and
-// only an operator with the Admin SDK could undo it.
-//
-// Both ways out clear that document, which the rule allows exactly because it
-// carries an error — a running teardown still can't be cancelled out of, and a
-// half-dismantled account is not a state to hand anyone back. Asking again is
-// then a fresh create, so the function's attempt budget starts over.
-//
-// The copy says what happened rather than what was intended. "Nothing was
-// deleted" would be a lie: this stops partway through, and the phases run stays
-// first — so the likeliest failure has already cancelled someone's trips and
-// taken them out of their friends' lists.
+// Both buttons clear the doc; rules allow that only once `error` is set.
 function Stalled({ request }: { request: DeletionRequest }): ReactElement {
   const { user } = useKip();
   const [busy, setBusy] = useState(false);

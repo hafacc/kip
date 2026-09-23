@@ -71,11 +71,25 @@ export function watchIncomingBookings(
   );
 }
 
-export type BookingOutcome = "requested" | "confirmed" | "unavailable";
+// "changed" is the slot no longer being what was shown — moved, removed, past,
+// or no longer instant — which the rules would refuse as a bare
+// permission-denied. Friends' dates are fetched, not live, so a stale copy is
+// ordinary; the caller refreshes and says what happened instead of offering a
+// retry that can only be refused again.
+export type BookingOutcome =
+  | "requested"
+  | "confirmed"
+  | "unavailable"
+  | "changed";
+
+function outcomeFor(why: SlotGone["why"]): BookingOutcome {
+  return why === "taken" ? "unavailable" : "changed";
+}
 
 // A normal slot stays OPEN — only the owner may flip it. An auto-accept slot is
 // first come, first served: concurrent grabs contend on the window doc inside a
-// transaction, so exactly one wins and the rest get "unavailable".
+// transaction, so exactly one wins and the rest get "unavailable". Either way
+// the slot is read first and compared with what was shown.
 export async function requestBooking(
   guestId: string,
   listing: Listing,
@@ -91,9 +105,19 @@ export async function requestBooking(
     cancelledBy: null,
     cancelReason: null,
   };
+  const windowRef = doc(db(), "listings", listing.id, "windows", window.id);
 
   if (!window.autoAccept) {
-    const _ref = await addDoc(collection(db(), "bookings"), {
+    // A failed read answers nothing, so the ask goes ahead and Firestore queues
+    // it — the same stance as `requestStayViaPortal`.
+    const snap = await getDoc(windowRef).catch(() => null);
+    const verdict = slotVerdict(
+      snap === null ? null : { exists: snap.exists(), ...(snap.data() ?? {}) },
+      window,
+      isExpired(window.end),
+    );
+    if (verdict) return outcomeFor(verdict);
+    await addDoc(collection(db(), "bookings"), {
       ...notice,
       windowId: window.id,
       status: "REQUESTED",
@@ -102,15 +126,20 @@ export async function requestBooking(
     return "requested";
   }
 
-  const windowRef = doc(db(), "listings", listing.id, "windows", window.id);
-  // Pre-allocated so the id is known for the notification after the commit.
+  // Pre-allocated because the slot update in the same commit must name it.
   const bookingRef = doc(collection(db(), "bookings"));
   try {
     await runTransaction(db(), async (tx) => {
       const snap = await tx.get(windowRef);
-      if (!snap.exists() || snap.data().status !== "OPEN") {
-        throw new Error("unavailable");
-      }
+      const verdict = slotVerdict(
+        { exists: snap.exists(), ...(snap.data() ?? {}) },
+        window,
+        isExpired(window.end),
+      );
+      if (verdict) throw new SlotGone(verdict);
+      // The host turned instant off since this was fetched; the rule lets a
+      // friend flip the slot only while it is on.
+      if (snap.data()?.autoAccept !== true) throw new SlotGone("moved");
       tx.update(windowRef, { status: "BOOKED", bookingId: bookingRef.id });
       tx.set(bookingRef, {
         ...notice,
@@ -121,9 +150,7 @@ export async function requestBooking(
     });
     return "confirmed";
   } catch (error) {
-    if (error instanceof Error && error.message === "unavailable") {
-      return "unavailable";
-    }
+    if (error instanceof SlotGone) return outcomeFor(error.why);
     throw error;
   }
 }
@@ -198,10 +225,6 @@ export async function requestStayViaPortal(
   listingId: string,
   window: Slot,
 ): Promise<void> {
-  // Only a read that actually answered may refuse an ask. Offline this rejects,
-  // and the ask still goes: `addDoc` queues locally and lands on reconnect,
-  // which is the property this flow is documented to have. Turning a cache miss
-  // into "those dates aren't offered any more" would drop the ask and lie.
   const slot = await getDoc(
     doc(db(), "listings", listingId, "windows", window.id),
   ).catch(() => null);

@@ -1,6 +1,12 @@
 "use client";
 
-import { type ReactElement, useCallback, useEffect, useState } from "react";
+import {
+  type ReactElement,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { LuRefreshCw, LuTrash2 } from "react-icons/lu";
 import {
   deleteFeedback,
@@ -26,10 +32,12 @@ function when(at: number): string {
 
 export default function FeedbackView(): ReactElement {
   const { user, admin, prefs } = useKip();
-  // Read ONCE, on the way in. `prefs.feedbackSeenAt` moves the moment this marks
-  // itself seen, so reading it live would clear every mark a beat after the
-  // screen drew them — the reader would never see which ones were new.
-  const [wasSeenAt] = useState(prefs.feedbackSeenAt);
+  // Frozen when the reports land, just before this screen marks them seen:
+  // read live, the mark would clear every dot a beat after drawing it, and read
+  // on mount it is the cold default on a reload straight into this screen.
+  const seenAt = useRef(prefs.feedbackSeenAt);
+  seenAt.current = prefs.feedbackSeenAt;
+  const [wasSeenAt, setWasSeenAt] = useState<number | null>(null);
   const [reports, setReports] = useState<readonly Report[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -38,7 +46,9 @@ export default function FeedbackView(): ReactElement {
     setBusy(true);
     setProblem(null);
     try {
-      setReports(await fetchFeedback());
+      const fetched = await fetchFeedback();
+      setWasSeenAt(seenAt.current);
+      setReports(fetched);
       // Marked seen HERE, not on mount, and only for someone the reports were
       // actually shown to. On mount it fired for anyone who guessed the
       // fragment and was refused every report — clearing their dot for reports
@@ -100,7 +110,9 @@ export default function FeedbackView(): ReactElement {
           </p>
         ) : null}
         {reports === null ? (
-          <p className="px-1 text-sm text-muted">Loading…</p>
+          problem ? null : (
+            <p className="px-1 text-sm text-muted">Loading…</p>
+          )
         ) : reports.length === 0 ? (
           <p className="px-1 text-sm text-muted">Nothing yet.</p>
         ) : (

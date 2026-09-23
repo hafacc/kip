@@ -30,7 +30,9 @@ const AUTH_PROJECT = "demo-kip";
 const DOCS = `${FIRESTORE}/v1/projects/${PROJECT}/databases/(default)/documents`;
 const LISTING = "host-check-listing";
 const WINDOW = "host-check-window";
-const EMAIL = "host-check@example.com";
+// Per run: the emulator keeps its accounts for as long as it is up, so a fixed
+// address signs into the previous run's account and inherits its data.
+const EMAIL = `host-check-${Date.now()}@example.com`;
 
 const failures = [];
 function expect(what, ok, detail = "") {
@@ -78,6 +80,7 @@ async function browser() {
     ],
     { stdio: "ignore" },
   );
+  process.on("exit", () => chrome?.kill());
   await new Promise((r) => setTimeout(r, 5000));
   const targets = await (await fetch("http://127.0.0.1:9334/json/list")).json();
   const ws = new WebSocket(targets.find((t) => t.type === "page").webSocketDebuggerUrl);
@@ -133,7 +136,7 @@ const asked = await page.evaluate(`
   };
   const field = document.querySelector("input");
   if (!field) return "no field on the welcome screen";
-  type(field, "host-check@example.com");
+  type(field, ${JSON.stringify(EMAIL)});
   await new Promise(r => setTimeout(r, 400));
   const submit = document.querySelector("button[type=submit]");
   if (!submit || submit.disabled) return "submit unavailable";
@@ -147,7 +150,7 @@ expect("a link is sent", String(asked).startsWith("SENT::") && !String(asked).in
 // The emulator publishes the link it would have mailed, which is the whole
 // reason this can run unattended.
 const codes = await (await fetch(`${AUTH}/emulator/v1/projects/${AUTH_PROJECT}/oobCodes`)).json();
-const link = codes.oobCodes?.at(-1)?.oobLink;
+const link = codes.oobCodes?.findLast((sent) => sent.email === EMAIL)?.oobLink;
 expect("the emulator captured it", Boolean(link), JSON.stringify(codes).slice(0, 160));
 if (!link) {
   console.log(`\n${failures.length} failed`);
@@ -188,8 +191,7 @@ if (!uid) {
 }
 
 // The link's whole job is to put someone back in kip, so returning ends in the
-// app. It used to stop at "Welcome back" and an Open kip link — a step between
-// someone and the thing they had already asked for.
+// app.
 const landed = JSON.parse(
   await page.evaluate(
     `JSON.stringify({ href: location.href, text: document.body.innerText.slice(0, 200) })`,
@@ -277,7 +279,12 @@ for (const [id, guest, at] of [
 }
 
 console.log("\nthe list says the slot has been asked about");
-await page.go(`${APP}/#/room/${LISTING}`, 9000);
+// Reloaded, not just re-addressed: a fragment change is not a load, and the app
+// has sat since sign-in on an account with no profile — so the name sheet it
+// offers such an account is still up, over everything that follows.
+await page.go(`${APP}/#/room/${LISTING}`, 1500);
+await page.evaluate(`location.reload(); "reloading"`);
+await new Promise((r) => setTimeout(r, 9000));
 const row = await page.evaluate(`
 (async () => {
   for (let i = 0; i < 20; i++) {
@@ -438,7 +445,6 @@ expect(
   String(kept).slice(0, 160),
 );
 
-process.on("exit", () => chrome?.kill());
 if (failures.length) {
   console.log(`\n${failures.length} failed`);
   process.exit(1);
