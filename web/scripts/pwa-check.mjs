@@ -20,11 +20,12 @@ import { mkdir, rm, symlink } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const PORT = 4173;
-// Under a base path, because that is what production is: Pages serves kip from
-// /<repo>, and manifest scope, the worker's registration path and the offline
-// key are all built from it. Served out of a directory holding `kip -> out`, so
-// the URLs are the deployed ones rather than a root-served approximation.
-const BASE = "/kip";
+// At the root, because that is what production is: Pages serves kip at the root
+// of kip.hafa.cc. Manifest scope, the worker's registration path and the
+// offline key are all built from the base path, so `KIP_PWA_BASE=/kip` runs the
+// same checks under one — served out of a directory holding `kip -> out`, so
+// the URLs are what a path-served deploy would use.
+const BASE = process.env.KIP_PWA_BASE ?? "";
 const APP = `http://localhost:${PORT}${BASE}`;
 const SERVE = "/tmp/kip-pwa-serve";
 const PROFILE = "/tmp/kip-pwa-check";
@@ -46,13 +47,15 @@ function runExport() {
   if (done.status !== 0) throw new Error("export failed");
 }
 
-console.log("building the export");
-// The base path is what production builds with; `bun export` alone would test a
-// shape nothing ships.
+console.log(`building the export${BASE ? ` under ${BASE}` : ""}`);
 runExport();
 await rm(SERVE, { recursive: true, force: true });
-await mkdir(SERVE, { recursive: true });
-await symlink(resolve("out"), `${SERVE}${BASE}`);
+if (BASE) {
+  await mkdir(SERVE, { recursive: true });
+  await symlink(resolve("out"), `${SERVE}${BASE}`);
+} else {
+  await symlink(resolve("out"), SERVE);
+}
 
 // Serving `out/` rather than pointing at Pages: the worker needs a secure
 // context, and localhost is one.

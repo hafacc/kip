@@ -56,7 +56,7 @@ export function otherAccountAlert(door: string): {
 }
 
 // Routes that own their identity flow. Matched on a trailing segment so the
-// GitHub Pages base path doesn't change the answer.
+// base path, when there is one, doesn't change the answer.
 function ownRoute(pathname: string): boolean {
   return /\/(portal|continue)\/?$/.test(pathname);
 }

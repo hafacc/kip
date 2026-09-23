@@ -21,8 +21,8 @@ execFileSync(
   },
 );
 
-// Set by the deploy workflow to /<repo>; the org's custom domain still serves
-// each repo under that path.
+// Unset in the release, which serves kip at the root of its own domain. Set it
+// to serve under a path (e.g. `/kip`); everything that builds a URL reads it.
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
 export default {

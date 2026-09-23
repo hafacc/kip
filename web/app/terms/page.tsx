@@ -9,15 +9,15 @@ export const metadata: Metadata = {
   description: "The rules for using kip, written to be read.",
 };
 
-const UPDATED = "August 23, 2026";
+const UPDATED = "September 23, 2026";
 
 export default function TermsPage(): ReactElement {
   return (
     <DocPage title="Terms of Service" updated={UPDATED} route="/terms/">
       <P>
         These are the terms for using kip (
-        <a className={link} href="https://hafa.cc/kip">
-          https://hafa.cc/kip
+        <a className={link} href="https://kip.hafa.cc">
+          https://kip.hafa.cc
         </a>
         ), a friends-only space-sharing app operated by{" "}
         <a className={link} href={HAFA_URL}>

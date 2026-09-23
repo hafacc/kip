@@ -1368,7 +1368,8 @@ cancellations, which are the easiest pair to get backwards).
 
 Each notice carries a **`path`, a `cta` label and the OTHER party's `person`**, so every email links
 to the thing it's about — a booking event to `#/booking/<id>`, a connect request to `#/friends`,
-joined to `SITE_ORIGIN` in `index.ts` (a plain constant, base path included). `renderEmail` is pure
+joined to `SITE_ORIGIN` in `index.ts` (a plain constant, `https://kip.hafa.cc`; a base path would go
+there too if the site were ever served under one). `renderEmail` is pure
 too and produces both an HTML and a text part from ONE template that never branches on the event.
 Email clients aren't browsers: tables, inline styles, no webfont, and every gradient painted over a
 solid of the same family so a client that drops `background-image` still shows a legible button.
@@ -1699,7 +1700,8 @@ knowing before it is needed.
 
 `app/manifest.ts` plus the compiled worker make kip installable, and `Pwa` (mounted in the layout)
 registers the worker after load. Nothing is prefixed for us, so `start_url`, `scope` and every icon
-path read `NEXT_PUBLIC_BASE_PATH` themselves; `scope` covers the whole app so a share link opens
+path read `NEXT_PUBLIC_BASE_PATH` themselves. The release no longer sets it — kip is served at the
+root of `kip.hafa.cc` — but the support stays, so building under a path is still one env var; `scope` covers the whole app so a share link opens
 inside an installed kip rather than bouncing to a tab. Icons are rendered from `app/icon.svg`, with
 a separate full-bleed maskable one because Android crops the disc otherwise.
 
@@ -1719,8 +1721,10 @@ Safari fires no such event at all, so on an iPhone the row explains Share → Ad
 instead of offering a button that cannot work, and iPads are found by their Macintosh user agent
 plus a touchscreen. Installed already, neither shows.
 
-`bun run check:pwa` builds with the base path and serves it under one, since manifest scope, the
-registration path and the offline key are all built from it and nothing else exercises that. It
+`bun run check:pwa` builds and serves at the ROOT, because that is what production is.
+`KIP_PWA_BASE=/kip bun run check:pwa` runs the same checks built and served under a path, since
+manifest scope, the registration path and the offline key are all built from the base path and
+nothing else exercises that support now the release has stopped using it. It
 asserts Chrome's own verdict — that it fires `beforeinstallprompt` at all — that no capability
 reaches a cache key, and then **kills the server** and checks kip still renders. That last part
 matters: the first version emulated offline through CDP, which does not apply to the fetches a
@@ -2076,8 +2080,8 @@ If port 8080 is already held by another project's emulator, switch both `firebas
    fictional **test phone numbers** there too, since phone auth refuses localhost and there is no
    other way to exercise it locally outside the Auth emulator. Optionally turn on **reCAPTCHA SMS
    defense** in audit mode; with US-only plus the per-IP caps, audit is likely enough indefinitely.
-   Confirm `hafa.cc` and `localhost` are authorized domains — the sign-in link redirects
-   there. And **anonymous account auto-deletion must be OFF** (it lives on the Anonymous provider,
+   Confirm `kip.hafa.cc`, `auth.kip.hafa.cc` and `localhost` are authorized domains — the
+   sign-in link redirects to the first, and the Google popup runs on the second. And **anonymous account auto-deletion must be OFF** (it lives on the Anonymous provider,
    not under Settings): it cannot read Firestore, so it cannot tell a one-visit ticket from someone
    carrying a name, a live ask and friendships, and re-enabling it deletes real people on a timer
    with nothing failing loudly. `reapAnonymousTickets` is what collects tickets instead.
@@ -2086,8 +2090,8 @@ If port 8080 is already held by another project's emulator, switch both `firebas
    Firestore **TTL policy** on the `grants` collection group, field `expires` (housekeeping only —
    an expired grant is already inert). The `debug` collection wants the same policy on the same
    field, and there it is the only thing bounding the pile.
-8. **Authentication → Settings → Authorized domains:** add the deployed domain (e.g.
-   `<user>.github.io`) so sign-in works in production.
+8. **Authentication → Settings → Authorized domains:** add the deployed domain (`kip.hafa.cc`)
+   so sign-in works in production.
 
 `hafaio-kip-dev` is already on Blaze and already upgraded to **Identity Platform**
 (`subtype: IDENTITY_PLATFORM`), with anonymous sign-in enabled and
@@ -2102,24 +2106,37 @@ the additive fix (note anonymous auth bypasses blocking functions).
 
 `.github/workflows/web.yml` (manual `workflow_dispatch` or a published Release) does the whole
 release: CI gate → **Firebase** (Firestore rules, Storage rules, functions and Hosting) → GitHub Pages (`bun export` with
-`NEXT_PUBLIC_BASE_PATH=/<repo>`, uploads `web/out`).
+no base path, uploads `web/out`). The repo's own Pages custom domain, `kip.hafa.cc`, serves the app at
+its root.
 
 **Firebase goes first, deliberately.** The site must never publish expecting rules or triggers that
 aren't live yet; if that job fails, Pages never runs and the site stays on the last good version.
 Both rule sets deploy every time (seconds, idempotent); functions too, since working out whether they changed
 since the last release is more trouble than just deploying them.
 
-**Firebase Hosting serves `kip.hafa.cc`, and it serves no pages.** That domain exists because it is
-the app's `authDomain` (`utils/firebase.ts`): the Google sign-in popup opens Firebase's reserved
-`/__/auth/*` pages on it, so the consent screen names kip's domain instead of a `firebaseapp.com`
-one. The app itself lives on GitHub Pages at `hafa.cc/kip/`. The `hosting` block in `firebase.json`
-therefore 301s every path onto the same path under `https://hafa.cc/kip/` — `/about` to `/kip/about`,
-which Pages then slashes to `/kip/about/`. `/` has its own rule ahead of the `/:path*` capture so the
-root lands on exactly `https://hafa.cc/kip/` without leaning on how an empty capture expands. And `firebase/hosting/` is a placeholder only because Hosting
-insists on a `public` directory. Reserved `/__/*` paths are answered by Firebase ahead of any
-redirect, so sign-in is unaffected — the one thing to confirm after the first deploy that includes
-Hosting is that `https://kip.hafa.cc/__/auth/handler` still returns 200. The domain must stay a
-plain domain in the console's Hosting settings: set there as a redirect, it overrides this config.
+**kip has two hosts: the app on GitHub Pages at `kip.hafa.cc`, and sign-in on Firebase Hosting at
+`auth.kip.hafa.cc`.** The app is served at the root of `kip.hafa.cc`, set as this repo's Pages custom
+domain. It used to live at `hafa.cc/kip/`, and moved because a path is not an origin: there it
+shared localStorage, IndexedDB (Firestore's offline cache and the auth session) and service-worker
+scope with every other project under `hafa.cc`, any of whose scripts could read kip's. Moving
+changed the origin, so everyone was signed out once. GitHub should redirect `hafa.cc/kip/…` to
+`kip.hafa.cc/…` now that the repo has its own domain — **unconfirmed until checked after the switch**.
+
+`auth.kip.hafa.cc` exists because it is the app's `authDomain` (`utils/firebase.ts`): the Google
+sign-in popup opens Firebase's reserved `/__/auth/*` pages on it, so the consent screen names kip's
+domain instead of a `firebaseapp.com` one. It serves no pages. The `hosting` block in
+`firebase.json` 301s every other path onto the same path under `https://kip.hafa.cc/`. `/` has its
+own rule ahead of the `/:path*` capture so the root lands on exactly `https://kip.hafa.cc/` without
+leaning on how an empty capture expands. And `firebase/hosting/` is a placeholder only because
+Hosting insists on a `public` directory. Reserved `/__/*` paths are answered by Firebase ahead of any
+redirect, so sign-in is unaffected — the one thing to confirm after deploying is that
+`https://auth.kip.hafa.cc/__/auth/handler` returns 200. The domain must stay a plain domain in the
+console's Hosting settings: set there as a redirect, it overrides this config.
+
+**DNS**: `kip.hafa.cc` carries GitHub Pages' four A records (`185.199.108.153` through
+`185.199.111.153`) beside the Cloudflare MX/SPF records that forward `support@` and the Firebase
+email TXT/DKIM records — the mail records are why the app's host and the mail domain can be the
+same name. `auth.kip.hafa.cc` carries Firebase Hosting's A record.
 
 **Auth is Workload Identity Federation — no key is stored anywhere.** GitHub mints a short-lived
 OIDC token (that's what `id-token: write` in the workflow is for) and GCP trades it for impersonation
@@ -2186,11 +2203,12 @@ without that, tsc can't resolve the firebase-functions types.
 
 ## Shipped
 
-kip is live at `https://hafa.cc/kip` (the repo is public), released by
+kip is live at `https://kip.hafa.cc` (the repo is public; it was at `https://hafa.cc/kip` until
+September 2026 — see Deployment), first released by
 `.github/workflows/web.yml` on 2026-07-30 — the first run of that workflow, which deployed rules and
 all four functions (`onBookingCreated`, `onBookingChanged`, `onConnectRequested`, `unsubscribe`)
-before publishing Pages, exactly as designed. `hafa.cc` is an authorized domain in Firebase
-Auth, the email secret was set (since replaced: `RESEND_API_KEY` must be set before the next
+before publishing Pages, exactly as designed. `kip.hafa.cc` and `auth.kip.hafa.cc` need to be
+authorized domains in Firebase Auth, the email secret was set (since replaced: `RESEND_API_KEY` must be set before the next
 release — see Notifications), and `SITE_ORIGIN` in `functions/src/index.ts` matches
 where Pages actually serves.
 

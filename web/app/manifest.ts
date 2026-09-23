@@ -1,7 +1,7 @@
 import type { MetadataRoute } from "next";
 
-// Pages serves the site under /<repo>, and nothing here is prefixed for us:
-// `start_url`, `scope` and every icon path are taken literally.
+// Nothing here is prefixed for us — `start_url`, `scope` and every icon path
+// are taken literally — so a build under a base path has to add it itself.
 const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
 // A static export has no request to vary on.

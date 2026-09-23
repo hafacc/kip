@@ -76,8 +76,9 @@ function smsConfigured(): boolean {
   return Boolean(TWILIO_ACCOUNT_SID && TWILIO_KEY_SID && TWILIO_FROM);
 }
 
-// The `/kip` tail is the GitHub Pages base path; dropping it 404s every link.
-const SITE_ORIGIN = "https://hafa.cc/kip";
+// Where Pages serves the app. If it ever moves under a path again, the path goes
+// here too, or every link 404s.
+const SITE_ORIGIN = "https://kip.hafa.cc";
 
 const REGION = "us-central1";
 

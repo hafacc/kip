@@ -372,7 +372,7 @@ describe("whose photo the email carries", () => {
 
 describe("rendering an email", () => {
   const notice = noticeForNewBooking(booking, BOOKING_ID);
-  const ORIGIN = "https://hafa.cc/kip";
+  const ORIGIN = "https://kip.hafa.cc";
   const UNSUB =
     "https://us-central1-hafaio-kip-dev.cloudfunctions.net/unsubscribe?uid=host&kind=bookingRequested&key=k1";
   const withPhoto = renderEmail(notice, {
@@ -386,19 +386,23 @@ describe("rendering an email", () => {
     unsubscribeUrl: UNSUB,
   });
 
-  // The site is served under a base path, so a link that drops it 404s.
+  // A base path, if the site is ever served under one again, must survive the
+  // join — a link that drops it 404s.
   it("joins the fragment path onto the origin, base path and all", () => {
     expect(linkTo(ORIGIN, "#/booking/bk_42")).toBe(
-      "https://hafa.cc/kip/#/booking/bk_42",
+      "https://kip.hafa.cc/#/booking/bk_42",
     );
-    expect(linkTo("https://hafa.cc/kip/", "#/friends")).toBe(
-      "https://hafa.cc/kip/#/friends",
+    expect(linkTo("https://kip.hafa.cc/", "#/friends")).toBe(
+      "https://kip.hafa.cc/#/friends",
+    );
+    expect(linkTo("https://example.com/kip/", "#/friends")).toBe(
+      "https://example.com/kip/#/friends",
     );
   });
 
   it("carries the link and the button in the HTML", () => {
     expect(withPhoto.html).toContain(
-      'href="https://hafa.cc/kip/#/booking/bk_42"',
+      'href="https://kip.hafa.cc/#/booking/bk_42"',
     );
     expect(withPhoto.html).toContain("Review the request");
   });
@@ -407,7 +411,7 @@ describe("rendering an email", () => {
   it("keeps a plain-text alternative that still links", () => {
     expect(withPhoto.text).toContain("Sam would like");
     expect(withPhoto.text).toContain(
-      "Review the request: https://hafa.cc/kip/#/booking/bk_42",
+      "Review the request: https://kip.hafa.cc/#/booking/bk_42",
     );
   });
 
@@ -476,7 +480,7 @@ describe("rendering an email", () => {
     );
     expect(connect.html).toContain("Priya Raman");
     expect(connect.html).toContain(
-      'href="https://hafa.cc/kip/#/friends"',
+      'href="https://kip.hafa.cc/#/friends"',
     );
     expect(connect.subject).toBe("Priya wants to connect on kip");
   });
@@ -572,11 +576,11 @@ function everyNotice(name: string): Notice[] {
 }
 
 describe("what a text can carry", () => {
-  const ORIGIN = "https://hafa.cc/kip";
+  const ORIGIN = "https://kip.hafa.cc";
 
   it("says the one line the subject already is, and links to it", () => {
     expect(renderSms(noticeForNewBooking(booking, BOOKING_ID), ORIGIN)).toBe(
-      "Sam asked to stay https://hafa.cc/kip/#/booking/bk_42",
+      "Sam asked to stay https://kip.hafa.cc/#/booking/bk_42",
     );
   });
 
@@ -985,7 +989,7 @@ describe("what a posted form asks for", () => {
 });
 
 describe("the page a POST lands on", () => {
-  const SETTINGS = "https://hafa.cc/kip/#/settings";
+  const SETTINGS = "https://kip.hafa.cc/#/settings";
   const done = renderUnsubscribed("stayCancelled", SETTINGS);
 
   // "Unsubscribe" reads as "stop all of this", so the page has to say which one

@@ -11,6 +11,8 @@ Nobody can find you unless you let them. You're reached by a **username you choo
 profile. A link works before the person has an account: they can see what's free, and only need
 one at the point of asking.
 
+Live at <https://kip.hafa.cc>.
+
 Responsive web client (Next.js, static export) synced via Firestore. Native mobile apps come later.
 
 ## Running locally

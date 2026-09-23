@@ -19,7 +19,7 @@ import { type FirebaseStorage, getStorage } from "firebase/storage";
 export const firebaseConfig = {
   apiKey: "AIzaSyDvsK-HqXYuHuYlxO_IFh8aGWly6c7_yDI",
   // A Firebase Hosting custom domain; the Google sign-in popup shows this name.
-  authDomain: "kip.hafa.cc",
+  authDomain: "auth.kip.hafa.cc",
   projectId: "hafaio-kip-dev",
   storageBucket: "hafaio-kip-dev.firebasestorage.app",
   messagingSenderId: "230290747847",
