@@ -10,6 +10,7 @@ import {
   type QueryDocumentSnapshot,
   setDoc,
   Timestamp,
+  updateDoc,
   writeBatch,
 } from "firebase/firestore";
 import { db, onSnapshotError } from "./firebase";
@@ -130,24 +131,72 @@ function toFriend(snap: QueryDocumentSnapshot<DocumentData>): Friend {
   };
 }
 
-// Heals the copy of you in every friend's list — the rule lets you rewrite the
-// entry describing YOU, which is the only way that copy is ever corrected. Name
-// and photo always go together, so a photo-only heal still satisfies the name pin.
+// Firestore refuses a batch past 500 writes.
+const BATCH_LIMIT = 500;
+
+type EdgeIdentity = {
+  displayName: string;
+  photoURL: string | null;
+  username: string;
+};
+
+// Rewrites the copy of you in every friend's list — the rule lets you rewrite
+// the entry describing YOU, which is the only way that copy is ever corrected.
+// All three fields go every time: the rule compares each against your committed
+// profile, so an edge written before you claimed a handle holds '' and a heal
+// that left `username` out would be refused along with its whole batch.
+//
+// A chunk that fails is retried edge by edge, so one missing reverse edge (an
+// unfriend landing mid-heal) costs that edge and not everyone else's.
+export async function healFriendEdges(
+  uid: string,
+  identity: EdgeIdentity,
+  friendUids: readonly string[],
+): Promise<void> {
+  for (let start = 0; start < friendUids.length; start += BATCH_LIMIT) {
+    const chunk = friendUids.slice(start, start + BATCH_LIMIT);
+    const batch = writeBatch(db());
+    for (const friendUid of chunk) {
+      batch.update(doc(db(), "users", friendUid, "friends", uid), identity);
+    }
+    try {
+      await batch.commit();
+    } catch (batchError) {
+      const results = await Promise.allSettled(
+        chunk.map((friendUid) =>
+          updateDoc(doc(db(), "users", friendUid, "friends", uid), identity),
+        ),
+      );
+      const failures = results.filter(
+        (result): result is PromiseRejectedResult =>
+          result.status === "rejected",
+      );
+      for (const failure of failures) {
+        console.error("healFriendEdges", failure.reason);
+      }
+      // Every edge refused is not a stray missing edge — it is the heal itself
+      // being wrong, and the caller should hear about it.
+      if (failures.length === chunk.length) throw batchError;
+    }
+  }
+}
+
 export async function updateProfileIdentity(
   uid: string,
-  identity: { displayName: string; photoURL: string | null },
+  identity: EdgeIdentity,
   friendUids: readonly string[],
 ): Promise<void> {
   // Before the edges, never in one batch: the edge rule compares against the
-  // COMMITTED profile, so batching checks the new name against the old.
-  await setDoc(doc(db(), "users", uid), identity, { merge: true });
-  if (friendUids.length === 0) return;
-
-  const batch = writeBatch(db());
-  for (const friendUid of friendUids) {
-    batch.update(doc(db(), "users", friendUid, "friends", uid), identity);
-  }
-  await batch.commit();
+  // COMMITTED profile, so batching checks the new name against the old. The
+  // handle is not written here — it is bound to the registry and only a claim
+  // sets it.
+  const { displayName, photoURL } = identity;
+  await setDoc(
+    doc(db(), "users", uid),
+    { displayName, photoURL },
+    { merge: true },
+  );
+  await healFriendEdges(uid, identity, friendUids);
 }
 
 export function watchFriends(

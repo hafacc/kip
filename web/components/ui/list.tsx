@@ -2,8 +2,6 @@
 
 import type { ReactElement, ReactNode } from "react";
 
-// A quiet section label — small, muted, semibold. Sections group the app's flat
-// lists the way iOS Settings groups its rows.
 export function SectionHeading({
   children,
   action,
@@ -22,7 +20,6 @@ export function SectionHeading({
   );
 }
 
-// A labeled section: a quiet heading over its content.
 export function Section({
   title,
   action,
@@ -42,8 +39,6 @@ export function Section({
   );
 }
 
-// A grouped list: a soft shadow-card holding rows separated by near-invisible
-// hairlines. The shadow is the separator; there's no outer border.
 export function Group({
   children,
   className = "",
@@ -60,9 +55,7 @@ export function Group({
   );
 }
 
-// One row in a grouped list. With `onClick` it's the whole-row tap target
-// (opening a detail screen or sheet); otherwise it's a passive container. Inner
-// text blocks should carry `min-w-0` + `truncate` so nothing overflows.
+// Inner text blocks should carry `min-w-0` + `truncate` so nothing overflows.
 export function Row({
   onClick,
   children,

@@ -11,9 +11,7 @@ const PAGES = [
 
 export type DocRoute = (typeof PAGES)[number]["href"];
 
-// Carried by the three surfaces a stranger can reach without signing in — the
-// welcome screen, a share link, and these pages themselves. `next/link` rather
-// than a bare anchor so the deploy's base path is applied for us.
+// `next/link` applies the base path; a bare anchor would not.
 export default function SiteFooter({
   current,
   className = "",
@@ -29,7 +27,7 @@ export default function SiteFooter({
         <Fragment key={href}>
           {index > 0 ? <span aria-hidden="true">·</span> : null}
           {href === current ? (
-            <span>{label}</span>
+            <span aria-current="page">{label}</span>
           ) : (
             <Link href={href} className="hover:text-muted">
               {label}

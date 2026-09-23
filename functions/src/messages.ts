@@ -10,6 +10,15 @@ export type NotifyKind =
   | "connectRequest"
   | "connectAccepted";
 
+// Why a booking was cancelled — the web side's `CancelReason`, pinned by
+// `tests/drift.test.ts`.
+export type CancelReason =
+  | "DECLINED"
+  | "WITHDRAWN"
+  | "SLOT_MOVED"
+  | "SLOT_CANCELLED"
+  | "STAY_CANCELLED";
+
 export type Party = "host" | "guest" | "recipient" | "sender";
 
 // The OTHER party — never the person being emailed.
@@ -37,6 +46,7 @@ export type BookingLike = {
   start: string;
   end: string;
   ownerId: string;
+  guestId?: string;
   hostName?: string;
   hostPhotoURL?: string | null;
   guestName?: string;
@@ -59,6 +69,22 @@ export const SETTINGS_PATH = "#/settings";
 
 function bookingPath(bookingId: string): string {
   return `#/booking/${encodeURIComponent(bookingId)}`;
+}
+
+// The same two origins `photoSrc` renders on the web side. A download URL on our
+// bucket names the bucket in its path, so the path is pinned as well as the host.
+const AVATAR_HOST = "https://lh3.googleusercontent.com/";
+
+// Compared after parsing, so `..` segments can't walk out of the bucket.
+export function photoFetchable(url: string, bucket: string): boolean {
+  let href: string;
+  try {
+    href = new URL(url).href;
+  } catch {
+    return false;
+  }
+  const ours = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/`;
+  return href.startsWith(ours) || href.startsWith(AVATAR_HOST);
 }
 
 function personPath(uid: string): string {
@@ -166,12 +192,17 @@ export function noticeForBookingChange(
   if (after.status !== "CANCELLED") return null;
 
   const byHost = after.cancelledBy === after.ownerId;
+  // Nobody to name means nobody to tell: every sentence below says who did it,
+  // and a guess sends one of them to the person who actually did.
+  if (!byHost && (!after.guestId || after.cancelledBy !== after.guestId)) {
+    return null;
+  }
   const wasPending = before.status === "REQUESTED";
 
   if (wasPending) {
     // Withdrawing your own ask needs no announcement.
     if (!byHost) return null;
-    if (after.cancelReason === "SLOT_MOVED") {
+    if (after.cancelReason === ("SLOT_MOVED" satisfies CancelReason)) {
       return {
         to: "guest",
         kind: "bookingDecision",
@@ -241,8 +272,7 @@ export function noticeForConnectRequest(request: RequestLike): Notice {
   };
 }
 
-// The friend edge the accept wrote, which the rules pin to the accepter's own
-// profile — so this is their real name, not the sender's guess at it.
+// The rules pin this edge's name and photo to the accepter's profile.
 export type FriendLike = {
   uid: string;
   displayName?: string;
@@ -551,8 +581,6 @@ ${action}
 </html>`;
 }
 
-// This page deliberately has no such link: a second one of equal weight beside
-// "turn off all kip email" makes the destructive one easier to mis-hit.
 function settingsButton(settingsUrl: string): string {
   return `<p class="act"><a class="cta" href="${escapeHtml(settingsUrl)}">Open kip Settings</a></p>`;
 }
@@ -582,6 +610,9 @@ sync();
 // here: `state` is what's stored, and the kind this email was about is shown
 // switched off because it now IS off, so the scope needs no wording to carry it.
 // Re-ticking that row and saving is the undo.
+//
+// No Settings link here: a second one of equal weight beside "turn off all kip
+// email" makes the destructive one easier to mis-hit.
 export function renderUnsubscribeChoices(
   kind: NotifyKind,
   state: NotifyState,
@@ -591,12 +622,7 @@ export function renderUnsubscribeChoices(
   const saved: NotifyState = { ...state, [kind]: false };
   // A real checkbox, clipped rather than hidden so it keeps focus and keyboard
   // behaviour with no JavaScript — a hand-made copy of the app's `Switch`, since
-  // a function has no build step to share one. The chip is what marks the row
-  // this email came from, and it's permanent: an animation saying "we just
-  // switched this off" would be over before the page is read, and while it ran
-  // it drew the thumb in the ON position over a box that was already off, so a
-  // tap landing in that window turned the row back on while appearing to do
-  // nothing at all.
+  // a function has no build step to share one.
   const boxes = KINDS.map((each) => {
     const tag =
       each === kind ? '<span class="tag">from this email</span>' : "";
@@ -793,9 +819,8 @@ const TRUNCATION = "...";
 // The split is made on the RAW subject, where the name is whatever `firstName`
 // returned and so cannot contain a space. `toGsm7` can INTRODUCE one — it folds
 // a non-breaking space, a newline and a tab into a plain space — so converting
-// first and then looking for the boundary finds it inside the name, which is how
-// a two-part name used to lose its first half and keep its second. The halves
-// are converted apart and rejoined for the same reason.
+// first would find the boundary inside the name. The halves are converted apart
+// and rejoined for the same reason.
 function fitLeadingName(subject: string, budget: number): string {
   const space = subject.indexOf(" ");
   const name = toGsm7(space === -1 ? subject : subject.slice(0, space));

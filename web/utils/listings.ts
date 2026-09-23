@@ -14,6 +14,7 @@ import {
   setDoc,
   Timestamp,
   updateDoc,
+  type WriteBatch,
   where,
   writeBatch,
 } from "firebase/firestore";
@@ -189,9 +190,18 @@ export async function setListingPhotos(
   });
 }
 
-// Takes the listing, its windows, their portals and its live bookings, in one
-// batch. A portal left behind would keep serving the place to anyone with the
-// old link, with nothing left to revoke it by.
+// Firestore refuses a batch past 500 writes.
+const BATCH_LIMIT = 500;
+
+// Takes the listing, its windows, their portals and its live bookings. A portal
+// left behind would keep serving the place to anyone with the old link, with
+// nothing left to revoke it by.
+//
+// One batch while it fits; past 500 writes it goes in order — stays, then
+// slots and links, then the listing LAST, since the slot rules read the
+// listing's owner and rules see committed state. A retry after a partial
+// failure re-derives everything: cancelled stays are skipped and the windows
+// are re-read.
 export async function deleteListing(
   listing: Listing,
   bookings: readonly Booking[],
@@ -199,7 +209,7 @@ export async function deleteListing(
   const windows = await getDocs(
     collection(db(), "listings", listing.id, "windows"),
   );
-  const batch = writeBatch(db());
+  const writes: ((batch: WriteBatch) => void)[] = [];
   // Future stays only. A stay that already happened is a record, not an
   // obligation — cancelling it would tell a guest their completed visit was
   // called off, and stamp the host as having done it.
@@ -209,23 +219,33 @@ export async function deleteListing(
       booking.status !== "CANCELLED" &&
       !isExpired(booking.end)
     ) {
-      batch.update(doc(db(), "bookings", booking.id), {
-        status: "CANCELLED",
-        cancelledBy: booking.ownerId,
-        cancelReason: "SLOT_CANCELLED",
-      });
+      writes.push((batch) =>
+        batch.update(doc(db(), "bookings", booking.id), {
+          status: "CANCELLED",
+          cancelledBy: booking.ownerId,
+          cancelReason: "SLOT_CANCELLED",
+        }),
+      );
     }
   }
   for (const window of windows.docs) {
     const slotPortalId = window.data().publicPortalId as string | null;
-    if (slotPortalId) batch.delete(doc(db(), "portals", slotPortalId));
-    batch.delete(window.ref);
+    if (slotPortalId) {
+      writes.push((batch) => batch.delete(doc(db(), "portals", slotPortalId)));
+    }
+    writes.push((batch) => batch.delete(window.ref));
   }
-  if (listing.publicPortalId) {
-    batch.delete(doc(db(), "portals", listing.publicPortalId));
+  const listingPortalId = listing.publicPortalId;
+  if (listingPortalId) {
+    writes.push((batch) => batch.delete(doc(db(), "portals", listingPortalId)));
   }
-  batch.delete(doc(db(), "listings", listing.id));
-  await batch.commit();
+  writes.push((batch) => batch.delete(doc(db(), "listings", listing.id)));
+
+  for (let start = 0; start < writes.length; start += BATCH_LIMIT) {
+    const batch = writeBatch(db());
+    for (const write of writes.slice(start, start + BATCH_LIMIT)) write(batch);
+    await batch.commit();
+  }
 }
 
 export function watchWindows(

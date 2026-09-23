@@ -16,6 +16,7 @@ import {
 import { onRequest } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { logger } from "firebase-functions/v2";
+import { getStorage } from "firebase-admin/storage";
 import { reapTickets } from "./reap";
 import { tearDownAccount } from "./teardown";
 import nodemailer from "nodemailer";
@@ -37,6 +38,7 @@ import {
   noticeForNewBooking,
   notifyFromForm,
   notifyStateFrom,
+  photoFetchable,
   renderEmail,
   renderNotifySaved,
   renderSms,
@@ -133,20 +135,23 @@ const PHOTO_TYPES = new Set([
 
 type Photo = { content: Buffer; contentType: string };
 
-// Bounded on every axis because the URL comes off a user's own profile. The
-// size cap is checked after reading too, since `content-length` can lie. Every
-// failure is a null — a notification must not die over a photo.
+// Bounded on every axis because the URL comes off a user's own profile. Only
+// our own bucket and Google's avatar host are fetched, redirects are refused so
+// neither can bounce us elsewhere, and the size cap is counted as bytes arrive,
+// since `content-length` can lie or be absent. Every failure is a null — a
+// notification must not die over a photo.
 async function fetchPhoto(
   url: string | null | undefined,
 ): Promise<Photo | null> {
   if (!url) return null;
   try {
-    if (new URL(url).protocol !== "https:") return null;
+    if (!photoFetchable(url, getStorage().bucket().name)) return null;
 
     const response = await fetch(url, {
+      redirect: "error",
       signal: AbortSignal.timeout(PHOTO_TIMEOUT_MS),
     });
-    if (!response.ok) return null;
+    if (!response.ok || !response.body) return null;
 
     const [declaredType = ""] = (
       response.headers.get("content-type") ?? ""
@@ -157,10 +162,21 @@ async function fetchPhoto(
     const declared = Number(response.headers.get("content-length"));
     if (declared > PHOTO_MAX_BYTES) return null;
 
-    const content = Buffer.from(await response.arrayBuffer());
-    if (content.byteLength > PHOTO_MAX_BYTES) return null;
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > PHOTO_MAX_BYTES) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
 
-    return { content, contentType };
+    return { content: Buffer.concat(chunks), contentType };
   } catch (error) {
     logger.warn("photo fetch failed", { error });
     return null;
@@ -180,7 +196,6 @@ function photoFilename(contentType: string, person: Person): string {
 async function send(to: Recipient, notice: Notice): Promise<void> {
   try {
     const photo = await fetchPhoto(notice.person.photoURL);
-    // One url for header and footer, so the two can never diverge.
     const unsubscribeUrl = unsubscribeLink(
       unsubscribeEndpoint(),
       to.uid,
@@ -262,13 +277,10 @@ async function emailIfWanted(
 }
 
 // The Twilio credential is fetched at FIRST USE rather than declared as a
-// `defineSecret` param, and that is a release decision rather than a stylistic
-// one: the CLI resolves every declared secret at deploy, so a non-interactive
-// one fails outright on a secret Secret Manager doesn't hold. Naming it put the
-// whole site's release — rules, triggers and Pages — behind a credential only
-// this switched-off branch has any use for, held up by nothing but a
-// hand-created empty placeholder. Read here it is a runtime condition: a
-// missing one fails the text and says so, and nothing else notices.
+// `defineSecret` param: the CLI resolves every declared secret at deploy, so a
+// non-interactive deploy fails outright on one Secret Manager doesn't hold, and
+// the whole release would wait on a credential only this switched-off branch
+// uses. Read here, a missing one fails the text and nothing else notices.
 //
 // GMAIL_APP_PASSWORD stays a declared secret. It exists, email is live, and a
 // deploy that can't resolve it is a deploy worth stopping.
@@ -654,7 +666,6 @@ export const unsubscribe = onRequest(
     const uid = typeof request.query.uid === "string" ? request.query.uid : "";
     const key = typeof request.query.key === "string" ? request.query.key : "";
     const kind = asNotifyKind(request.query.kind);
-    // Null for every way this can go wrong, indistinguishably.
     const prefs = uid && key && kind ? await authorisedPrefs(uid, key) : null;
 
     // The url holds the key, so nothing downstream may cache the answer.
@@ -730,9 +741,7 @@ const INCIDENT_KEEP_DAYS = 14;
 
 // Leaving. The client writes `deletions/{uid}` and this dismantles the account
 // with the Admin SDK — `retry: true` because the whole point is that it finishes
-// without the person's participation. A browser doing this walked away mid-chain
-// and left an account that still had a profile, friends and places, which the
-// reaper then skipped forever: it collects only accounts with nothing attached.
+// without the person's participation.
 //
 // It reports its phase back into the document, which is both the progress bar
 // the app draws and the only way a stuck teardown is visible at all.
@@ -790,11 +799,8 @@ export const onAccountDeletionRequested = onDocumentCreated(
 // Weekly, because nothing here is urgent and a small candidate set per run keeps
 // a mistake small too.
 //
-// A constant rather than the `REAP_DRY_RUN` env var it replaces, which defaulted
-// to a dry run when unset — and `functions/` has no `.env`, so this had never
-// once deleted anything while the privacy page promised abandoned sessions were
-// collected after thirty days. A rehearsal is this line flipped and redeployed:
-// visible in review, and impossible to be in without meaning to.
+// A constant so a dry run is a visible edit: this line flipped and redeployed,
+// impossible to be in without meaning to.
 const REAP_DRY_RUN = false;
 
 export const reapAnonymousTickets = onSchedule(

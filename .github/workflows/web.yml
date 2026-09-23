@@ -46,7 +46,7 @@ jobs:
       # --force answers the two prompts a non-interactive deploy can't: the retry policy
       # on the teardown and text-check triggers, and deleting a function that has left
       # the source. The second is the one to remember when renaming one.
-      - run: firebase deploy --only firestore:rules,functions --project hafaio-kip-dev --non-interactive --force
+      - run: firebase deploy --only firestore:rules,storage,functions --project hafaio-kip-dev --non-interactive --force
 
   build:
     needs: firebase

@@ -24,7 +24,7 @@ import {
 } from "../utils/username";
 import Avatar from "./avatar";
 import BookingRow from "./booking-row";
-import { useAction, useDialog } from "./dialog";
+import { useAction, useDialog, useFailure } from "./dialog";
 import PlaceCard from "./place-card";
 import RequestCard from "./request-card";
 import ShareLink from "./share-link";
@@ -320,6 +320,7 @@ function SelfIdentity(): ReactElement | null {
               value={username}
               onChange={(event) => setUsername(event.target.value)}
               placeholder="yourname"
+              aria-label="Username"
               prefix="@"
               suffix={
                 checking ? (
@@ -386,6 +387,7 @@ export default function PersonPage({ uid }: { uid: string }): ReactElement {
   } = useKip();
   const { confirm } = useDialog();
   const run = useAction();
+  const fail = useFailure();
   const isSelf = uid === user?.uid;
   const friend = friends.find((candidate) => candidate.uid === uid);
   // Already loaded either way, so the fetch below is only for someone searchable.
@@ -489,7 +491,7 @@ export default function PersonPage({ uid }: { uid: string }): ReactElement {
       await unfriend(friend.uid);
       back();
     } catch (error) {
-      console.error(error);
+      fail(error, `Couldn't remove ${friend.displayName}. Please try again.`);
     }
   }
 
@@ -501,6 +503,8 @@ export default function PersonPage({ uid }: { uid: string }): ReactElement {
         displayName: name,
         photoURL,
       });
+    } catch (error) {
+      fail(error, "Couldn't send that request. Please try again.");
     } finally {
       setAsking(false);
     }

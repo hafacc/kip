@@ -47,6 +47,29 @@ export function isExpired(end: string): boolean {
   return end < todayIso();
 }
 
+// The LOCAL calendar date, which is what a date input shows and what someone
+// means by "today". The rules compare against yesterday in UTC precisely so
+// that this can be local: `toISOString` would be UTC, putting a traveller west
+// of UTC a day ahead of their own calendar after late afternoon.
 export function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+// The rules' `staySightDays`: how long after checkout a stay still lets its two
+// parties look each other up.
+export const STAY_SIGHT_DAYS = 60;
+
+// Mirrors the rules' `endedWithin`, which reads `request.time` and so counts in
+// UTC — unlike `todayIso`, this has to agree with the server to the day, since
+// its whole use is predicting what the rules will allow.
+export function endedWithin(
+  end: string,
+  days: number,
+  now = Date.now(),
+): boolean {
+  const cutoff = new Date(now - days * 86_400_000).toISOString().slice(0, 10);
+  return end >= cutoff;
 }

@@ -18,9 +18,20 @@ import {
 // a rename now costs silence rather than a message to someone who opted out —
 // but silence about a cancelled stay is its own bug, and nobody reports a text
 // they never got. This pins them together so drift breaks CI instead.
-const FUNCTIONS_SOURCE = readFileSync("../functions/src/messages.ts", "utf8");
-const TRIGGERS_SOURCE = readFileSync("../functions/src/index.ts", "utf8");
-const TEARDOWN_SOURCE = readFileSync("../functions/src/teardown.ts", "utf8");
+//
+// Matched against source text with comments stripped, so a string that survives
+// only in a comment doesn't pass. The `[^:]` spares `https://` inside strings.
+function code(path: string): string {
+  return readFileSync(path, "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/.*$/gm, "$1");
+}
+
+const FUNCTIONS_SOURCE = code("../functions/src/messages.ts");
+const TRIGGERS_SOURCE = code("../functions/src/index.ts");
+const TEARDOWN_SOURCE = code("../functions/src/teardown.ts");
+const LEAVING_SOURCE = code("../functions/src/leaving.ts");
+const WEB_TYPES_SOURCE = code("utils/types.ts");
 
 function arrayMembers(source: string, name: string): string[] {
   const declaration = source.split(`const ${name} = [`)[1];
@@ -30,9 +41,9 @@ function arrayMembers(source: string, name: string): string[] {
   );
 }
 
-function unionMembers(typeName: string): string[] {
-  const declaration = FUNCTIONS_SOURCE.split(`type ${typeName} =`)[1];
-  if (!declaration) throw new Error(`no ${typeName} union in functions source`);
+function unionMembers(typeName: string, source = FUNCTIONS_SOURCE): string[] {
+  const declaration = source.split(`type ${typeName} =`)[1];
+  if (!declaration) throw new Error(`no ${typeName} union in source`);
   return [...declaration.split(";")[0].matchAll(/"([^"]+)"/g)]
     .map((match) => match[1])
     .sort();
@@ -74,9 +85,6 @@ describe("web and functions share a vocabulary", () => {
     expect(TRIGGERS_SOURCE).toContain("prefs.smsConsentNumber !== number");
   });
 
-  // In ORDER, not as a set: the deletion screen draws a determinate bar over
-  // these and numbers the steps, so a phase the web side has never heard of
-  // renders as a blank one, and a reordering renumbers someone's progress.
   // Settings tells someone whose carrier is blocking kip to text START to this
   // number, and that instruction is only true of the number kip actually sends
   // from. Wrong, it sends them to a phone kip has never texted from, where the
@@ -89,16 +97,33 @@ describe("web and functions share a vocabulary", () => {
     expect(declared.split(";")[0].trim()).toBe(JSON.stringify(SMS_FROM));
   });
 
+  // In ORDER, not as a set: the deletion screen draws a determinate bar over
+  // these and numbers the steps, so a phase the web side has never heard of
+  // renders as a blank one, and a reordering renumbers someone's progress.
   it("the teardown phases match, in order", () => {
     expect(arrayMembers(TEARDOWN_SOURCE, "DELETION_PHASES")).toEqual([
       ...DELETION_PHASES,
     ]);
   });
 
-  it("every cancel reason the client writes is handled or defaulted", () => {
-    // The function only special-cases SLOT_MOVED and lets the rest fall through
-    // to a generic message. That's fine — but it must at least still MATCH one
-    // the client writes, or the wording silently degrades for everyone.
-    expect(FUNCTIONS_SOURCE).toContain('"SLOT_MOVED"');
+  // The function special-cases only some reasons and gives the rest a generic
+  // message, so a renamed one doesn't fail — it silently degrades the wording.
+  it("cancel reasons match exactly", () => {
+    expect(unionMembers("CancelReason")).toEqual(
+      unionMembers("CancelReason", WEB_TYPES_SOURCE),
+    );
+  });
+
+  it("every reason leaving writes is one the web side knows", () => {
+    const known = new Set(unionMembers("CancelReason", WEB_TYPES_SOURCE));
+    const written = [
+      ...LEAVING_SOURCE.split("export function cancellationFor")[1].matchAll(
+        /"([A-Z_]+)"/g,
+      ),
+    ]
+      .map((match) => match[1])
+      .filter((literal) => literal !== "CANCELLED" && literal !== "CONFIRMED");
+    expect(written.length).toBeGreaterThan(0);
+    for (const reason of written) expect(known).toContain(reason);
   });
 });

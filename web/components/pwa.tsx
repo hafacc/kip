@@ -1,11 +1,8 @@
 "use client";
 
 import { type ReactElement, useEffect } from "react";
-// Side effect only: importing it is what attaches the install listener, at
-// module scope, before React can be late to it.
 import "../utils/install";
 
-// Registers the worker, once the page has loaded.
 export default function Pwa(): ReactElement | null {
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;

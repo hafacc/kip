@@ -65,6 +65,7 @@ async function browser() {
     `--user-data-dir=${PROFILE}`, "--disable-gpu", "--no-first-run",
     "--window-size=430,932", "about:blank",
   ], { stdio: "ignore" });
+  process.on("exit", () => chrome?.kill());
   await new Promise((r) => setTimeout(r, 6000));
   const targets = await (await fetch("http://127.0.0.1:9336/json/list")).json();
   const ws = new WebSocket(targets.find((t) => t.type === "page").webSocketDebuggerUrl);
@@ -113,7 +114,9 @@ await page.evaluate(`
   await new Promise(r => setTimeout(r, 6000));
 })()`);
 const codes = await (await fetch(`${AUTH}/emulator/v1/projects/${AUTH_PROJECT}/oobCodes`)).json();
-const code = new URL(codes.oobCodes?.at(-1)?.oobLink).searchParams.get("oobCode");
+const sent = codes.oobCodes?.findLast((held) => held.email === EMAIL);
+if (!sent) throw new Error(`no sign-in link was sent to ${EMAIL}`);
+const code = new URL(sent.oobLink).searchParams.get("oobCode");
 await page.go(`${APP}/continue/?mode=signIn&lang=en&apiKey=fake-api-key&oobCode=${encodeURIComponent(code)}#email=${encodeURIComponent(EMAIL)}`, 10000);
 const accounts = await (await fetch(`${AUTH}/identitytoolkit.googleapis.com/v1/projects/${AUTH_PROJECT}/accounts:query`, {
   method: "POST",
@@ -179,16 +182,25 @@ const kept = await page.evaluate(`
 (async () => {
   [...document.querySelectorAll("button")].find((b) => b.innerText.includes("Keep my account")).click();
   await new Promise(r => setTimeout(r, 4000));
-  return document.body.innerText;
+  return JSON.stringify({
+    text: document.body.innerText,
+    nav: Boolean(document.querySelector('nav [aria-current="page"]')),
+  });
 })()`);
+const keptScreen = JSON.parse(String(kept));
 expect("keeping the account clears the request", !(await exists(`deletions/${uid}`)));
 // Not merely "no longer the deletion screen": clearing the request used to be
 // read as the teardown FINISHING, which signed them out of an account that is
-// still there — and the welcome screen is not the deletion screen either.
+// still there — and the welcome screen is not the deletion screen either. So
+// it asks for the app's own navigation, which renders only behind the sign-in
+// gate. (Not the account menu: the profile was deleted above, and that menu
+// waits for a display name.)
 expect(
   "and hands the app back, still signed in",
-  !String(kept).includes("couldn't finish") && !String(kept).includes("Come in"),
-  String(kept).slice(0, 120),
+  !keptScreen.text.includes("couldn't finish") &&
+    !keptScreen.text.includes("Spare rooms and empty flats") &&
+    keptScreen.nav,
+  keptScreen.text.slice(0, 120),
 );
 await page.shot("deletion-escaped");
 
@@ -216,13 +228,7 @@ console.log("\nthe trigger finishes");
 await remove(`deletions/${uid}`);
 await new Promise((r) => setTimeout(r, 4000));
 const ended = await page.evaluate("document.body.innerText");
-// The welcome screen's own line, not the absence of a word: an inert sheet's
-// title sits in the DOM on every screen, so "is the name form up?" answers yes
-// even when nothing is showing. And not the door's LABEL, which is what this
-// used to look for — it read "Come in" once, the button now says "Continue",
-// and the check had been failing on a screen that was correct. The tagline is
-// rendered by `welcome-screen.tsx` and nowhere else, so it cannot be true of a
-// signed-in kip.
+// The welcome screen's tagline, which renders nowhere else.
 expect(
   "the session ends rather than dropping them into a nameless kip",
   !String(ended).includes("Deleting your kip") &&

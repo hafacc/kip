@@ -2,15 +2,10 @@
 //
 //   cd web && bun run feedback [count]
 //
-// This is the ONLY way to read it, and deliberately so — `firestore.rules`
-// refuses the collection to every client, its author included, so there is no
-// screen to build, no admin predicate to invent and no function to deploy. The
-// whole feature is a form plus a rule plus this.
-//
-// It resolves each reporter against Auth rather than storing anything about
-// them on the report: a report carries a uid and nothing else, and the name and
-// address that make it answerable live on the Auth account, which is where kip
-// keeps addresses everywhere else.
+// Lists reports with each sender resolved from Auth, which the in-app inbox
+// deliberately doesn't show. A report carries a uid and nothing else; the name
+// and address live on the Auth account, where kip keeps addresses everywhere
+// else.
 
 import { applicationDefault, initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";

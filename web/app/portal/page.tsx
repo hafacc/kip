@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 import { FaGoogle } from "react-icons/fa";
-import { LuLoaderCircle, LuMapPin } from "react-icons/lu";
+import { LuMapPin } from "react-icons/lu";
 import Avatar from "../../components/avatar";
 import { PhotoGallery } from "../../components/cover-photo";
 import ReachField, {
@@ -21,6 +21,7 @@ import ReachField, {
 } from "../../components/reach-field";
 import SiteFooter from "../../components/site-footer";
 import ThemeButton from "../../components/theme-button";
+import Busy from "../../components/ui/busy";
 import Button from "../../components/ui/button";
 import Chip from "../../components/ui/chip";
 import Input from "../../components/ui/input";
@@ -123,8 +124,10 @@ type Standing = {
 type Connect = "ask" | "sent" | "none" | "unknown";
 
 // The one screen outside the auth gate. Nothing here needs an account: browsing
-// needs no identity at all, and asking needs only a name. The buttons are live
-// from the first paint; tapping one holds the ask and asks who they are in place.
+// needs no identity at all, and asking needs only a name. For a visitor with no
+// name yet every button is live from the first paint; a named one's connect
+// control waits on the standing lookup. Tapping holds the ask and asks who they
+// are in place.
 export default function PortalPage(): ReactElement {
   const {
     user,
@@ -164,8 +167,14 @@ export default function PortalPage(): ReactElement {
   // hashchange listener matters because pasting a different link changes only the
   // fragment, which the browser treats as the same document — no reload.
   const [token, setToken] = useState("");
+  // For async work that outlives a fragment change and must not land on the
+  // next link's page.
+  const currentToken = useRef("");
   useEffect(() => {
-    const read = () => setToken(window.location.hash.slice(1));
+    const read = () => {
+      currentToken.current = window.location.hash.slice(1);
+      setToken(currentToken.current);
+    };
     read();
     window.addEventListener("hashchange", read);
     return () => window.removeEventListener("hashchange", read);
@@ -221,27 +230,43 @@ export default function PortalPage(): ReactElement {
   const hostId = portal?.ownerId ?? null;
   useEffect(() => {
     if (!user || !hostId) return;
+    let live = true;
     Promise.all([
       fetchMyBookingsWith(user.uid, hostId),
       fetchMyConnectRequest(user.uid, hostId),
       areFriends(user.uid, hostId),
     ])
       .then(([bookings, request, friend]) => {
-        const live = bookings.filter(
+        if (!live) return;
+        const current = bookings.filter(
           (booking) => booking.status !== "CANCELLED",
         );
         setStanding({
-          windowIds: live.map((booking) => booking.windowId),
-          confirmed: live.some((booking) => booking.status === "CONFIRMED"),
+          windowIds: current.map((booking) => booking.windowId),
+          confirmed: current.some((booking) => booking.status === "CONFIRMED"),
           connectPending: request !== null,
           friend,
         });
       })
-      .catch((error: unknown) => console.error(error));
+      // Offer the ask rather than wait for ever: a redundant ask is refused
+      // or harmless, while `unknown` has no control on it at all.
+      .catch((error: unknown) => {
+        console.error(error);
+        if (!live) return;
+        setStanding({
+          windowIds: [],
+          confirmed: false,
+          connectPending: false,
+          friend: false,
+        });
+      });
     // Runs for an anonymous visitor too, and must: they are the ones who ask.
     // Someone returning to their own pending ask hours later is signed in as the
     // same account (Firebase persists to IndexedDB), so this is what recognises
     // them instead of offering an ask they already made.
+    return () => {
+      live = false;
+    };
   }, [user, hostId]);
 
   // Written during render so a failure reports the state it actually failed in,
@@ -318,9 +343,19 @@ export default function PortalPage(): ReactElement {
           reason: gone ?? "refused",
           ask: { listingId, window: slot },
         });
+        // The dates on screen are the ones that just proved stale.
+        if (gone) {
+          fetchPortalPage(portal.id, ensureAnonymous())
+            .then((found) => {
+              if (found && found.portal.id === currentToken.current) {
+                setPage(found);
+              }
+            })
+            .catch((refetch: unknown) => console.error(refetch));
+        }
       })
       .finally(() => setBusy(null));
-  }, [ask, portal, user, profileReady, profile, report]);
+  }, [ask, portal, user, profileReady, profile, report, ensureAnonymous]);
 
   // A name is what an ask needs — not an account. Someone who has never typed
   // one has nothing to look up either, so their ask is live from the first
@@ -616,6 +651,7 @@ function NameForm({
         value={name}
         onChange={(event) => setName(event.target.value)}
         placeholder="Your name"
+        aria-label="Your name"
       />
       <ReachField
         state={reach}
@@ -627,14 +663,8 @@ function NameForm({
         invalid={Boolean(reachInvalid || error)}
         busy={busy}
       />
-      {/* Below both fields and above the button: it describes the reach field
-          it follows, and carries whatever is wrong. Nothing sits between the
-          two inputs, and the name needs no caption — the title asks for it.
-
-          Two lines are reserved so the swap never resizes the sheet, which
-          grows upward and would shove the fields off the thumb. Two rather
-          than one because the host's first name is in the standing copy, so
-          its length is not kip's to promise. */}
+      {/* Two lines reserved so a message swap never resizes the sheet; two
+          because the host's name is in the standing copy. */}
       <p
         aria-live="polite"
         className={`min-h-10 text-sm leading-5 ${problem ? "text-danger" : "text-muted"}`}
@@ -651,7 +681,7 @@ function NameForm({
           Boolean(reach.pending && !codeReady(reach))
         }
       >
-        {busy ? <LuLoaderCircle className="animate-spin" /> : "Send request"}
+        {busy ? <Busy label="Send request" /> : "Send request"}
       </Button>
 
       {/* Below the button it replaces, because that is what it is: the same ask
@@ -720,7 +750,7 @@ function PortalView({
         />
         <div className="min-w-0">
           <p className="text-sm text-muted">Shared by</p>
-          <p className="font-bold">{portal.ownerName}</p>
+          <h1 className="font-bold">{portal.ownerName}</h1>
         </div>
       </div>
 
@@ -770,7 +800,7 @@ function PortalView({
           disabled={busy !== null}
         >
           {busy === FRIEND_ONLY ? (
-            <LuLoaderCircle className="animate-spin" />
+            <Busy label="Ask to be friends" />
           ) : (
             "Ask to be friends"
           )}
@@ -883,11 +913,7 @@ function ListingBlock({
                   onClick={() => onAsk(listing.listingId, window)}
                   disabled={busy !== null}
                 >
-                  {busy === window.id ? (
-                    <LuLoaderCircle className="animate-spin" />
-                  ) : (
-                    "Request"
-                  )}
+                  {busy === window.id ? <Busy label="Request" /> : "Request"}
                 </Button>
               ) : null}
             </li>

@@ -8,7 +8,7 @@ import {
   LuPowerOff,
   LuRotateCw,
 } from "react-icons/lu";
-import { useDialog } from "./dialog";
+import { useDialog, useFailure } from "./dialog";
 import Button from "./ui/button";
 import IconButton from "./ui/icon-button";
 
@@ -42,6 +42,7 @@ export default function ShareLink({
   onRevoke: () => Promise<void>;
 }): ReactElement {
   const { confirm } = useDialog();
+  const fail = useFailure();
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -50,7 +51,7 @@ export default function ShareLink({
     try {
       await onCreate();
     } catch (error) {
-      console.error(error);
+      fail(error, "Couldn't make the link. Please try again.");
     } finally {
       setBusy(false);
     }
@@ -77,6 +78,8 @@ export default function ShareLink({
     setBusy(true);
     try {
       await onRevoke();
+    } catch (error) {
+      fail(error, "Couldn't turn off the link. Please try again.");
     } finally {
       setBusy(false);
     }
@@ -84,7 +87,12 @@ export default function ShareLink({
 
   async function copy(): Promise<void> {
     if (!portalId) return;
-    await navigator.clipboard.writeText(portalUrl(portalId));
+    try {
+      await navigator.clipboard.writeText(portalUrl(portalId));
+    } catch (error) {
+      fail(error, "Couldn't copy the link. Select it and copy it by hand.");
+      return;
+    }
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1500);
   }

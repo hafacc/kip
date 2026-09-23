@@ -1,12 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "bun:test";
 
-// Every surface that asks for an email or a number reserves its message slot at
-// the height of its own standing copy and swaps the text, so a line that runs
-// one longer than the reservation pushes the button under it — the exact jump
-// the reserved height was added to remove. Shortening the copy has been tried
-// before and did not hold, because nothing enforced a budget; this is the
-// budget.
+// An error that wraps to a second line grows its form, and a bottom sheet grows
+// upward, so the fields move under the thumb typing into them. Each surface's
+// errors are held to one rendered line by this budget.
 //
 // 42 characters, measured rather than reasoned: the narrowest slot is 342px (the
 // line under the door's card, at 390px less the page's px-6) and the sheets are

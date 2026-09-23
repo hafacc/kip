@@ -71,6 +71,7 @@ export default function FeedbackSheet({
             value={text}
             onChange={(event) => setText(event.target.value)}
             placeholder="What's on your mind?"
+            aria-label="Your feedback"
           />
           {/* Where it goes, said before the button rather than after it. kip
               keeps this to itself — nothing forwards it and nothing publishes

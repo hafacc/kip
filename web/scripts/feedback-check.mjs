@@ -60,19 +60,29 @@ async function browser() {
   await new Promise((done) => setTimeout(done, 1500));
   await rm(PROFILE, { recursive: true, force: true });
   chrome = spawn("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", [
-    "--headless=new", "--remote-debugging-port=9338",
+    "--headless=new", "--remote-debugging-port=9339",
     `--user-data-dir=${PROFILE}`, "--disable-gpu", "--no-first-run",
     "--window-size=430,932", "about:blank",
   ], { stdio: "ignore" });
   process.on("exit", () => chrome?.kill());
   await new Promise((r) => setTimeout(r, 6000));
-  const targets = await (await fetch("http://127.0.0.1:9338/json/list")).json();
+  const targets = await (await fetch("http://127.0.0.1:9339/json/list")).json();
   const ws = new WebSocket(targets.find((t) => t.type === "page").webSocketDebuggerUrl);
   await new Promise((r) => (ws.onopen = r));
   let id = 0;
   const waiting = new Map();
+  // `app/error.tsx` paints over a render throw, so the stack survives only in
+  // these page-level events.
+  const thrown = [];
   ws.onmessage = (event) => {
     const message = JSON.parse(event.data);
+    if (message.method === "Runtime.exceptionThrown") {
+      const detail = message.params?.exceptionDetails;
+      thrown.push(detail?.exception?.description ?? detail?.text ?? "?");
+    }
+    if (message.method === "Runtime.consoleAPICalled" && message.params?.type === "error") {
+      thrown.push((message.params.args ?? []).map((a) => a.description ?? a.value).join(" | "));
+    }
     if (message.id && waiting.has(message.id)) {
       waiting.get(message.id)(message.result ?? message.error);
       waiting.delete(message.id);
@@ -98,9 +108,8 @@ async function browser() {
   await send("Emulation.setDeviceMetricsOverride", {
     width: 430, height: 932, deviceScaleFactor: 1, mobile: true,
   });
-  // `app/error.tsx` paints over a render throw, so the stack survives only here.
-  send("Runtime.consoleAPICalled");
   return {
+    thrown,
     resize: (width, height) =>
       send("Emulation.setDeviceMetricsOverride", {
         width, height, deviceScaleFactor: 1, mobile: width < 768,
@@ -133,7 +142,7 @@ async function signIn() {
   await new Promise(r => setTimeout(r, 6000));
 })()`);
   const codes = await (await fetch(`${AUTH}/emulator/v1/projects/${AUTH_PROJECT}/oobCodes`)).json();
-  const link = codes.oobCodes?.at(-1)?.oobLink;
+  const link = codes.oobCodes?.findLast((sent) => sent.email === EMAIL)?.oobLink;
   // Loudly, or a door that never opened surfaces as an invalid-URL stack twenty
   // lines later saying nothing about the form it never found.
   if (!link) throw new Error("no sign-in link was sent — was the form on screen?");
@@ -166,10 +175,22 @@ await write(`users/${uid}`, {
 });
 
 // The menu, by its own accessible name — not by hunting for a class.
+// Waited for, because the menu renders only once the profile has a name — and
+// a read taken before it opens lists no rows, which the "not offered the
+// inbox" assertion would then pass on without having looked.
 const openMenu = `(async () => {
-  const you = document.querySelector('button[aria-label="You"]');
-  you?.click();
-  await new Promise(r => setTimeout(r, 500));
+  let you = null;
+  for (let i = 0; i < 40 && !you; i++) {
+    you = [...document.querySelectorAll('button[aria-label="You"]')]
+      .find((b) => b.getBoundingClientRect().height > 0);
+    if (!you) await new Promise(r => setTimeout(r, 250));
+  }
+  if (!you) return "no account menu";
+  you.click();
+  for (let i = 0; i < 20; i++) {
+    if ([...document.querySelectorAll("[role=menuitem], button")].some(b => b.innerText.trim() === "Sign out")) break;
+    await new Promise(r => setTimeout(r, 250));
+  }
   const rows = [...document.querySelectorAll("button")].map(b => b.innerText.trim()).join("|");
   // Shut again: navigating to a FRAGMENT does not reload, so a menu left open
   // here sits over the next screen and its rows land in every innerText after.
@@ -183,7 +204,7 @@ await page.go(APP, 8000);
 let menu = await page.evaluate(openMenu);
 expect("an ordinary account is offered Send feedback", /Send feedback/.test(menu), menu.slice(0, 120));
 // The row it must NOT have, which is the whole point of the role.
-expect("and is not offered the inbox", !/Feedback inbox/.test(menu), menu.slice(0, 120));
+expect("and is not offered the inbox", /Sign out/.test(menu) && !/Feedback inbox/.test(menu), menu.slice(0, 120));
 
 // The nonce is what every assertion below matches on. A generic prefix matches
 // a report left behind by an earlier run — the emulator keeps its data for as
@@ -223,8 +244,20 @@ await write("feedback/seed_older", {
 // Reaching the screen without the role: it must render, and show nothing.
 await page.go(`${APP}/#/feedback`, 8000);
 const denied = await page.evaluate(`document.body.innerText.replace(/\\s+/g, " ")`);
+// Positive first: the rules refuse the list query, and the screen says so — so
+// the absence below is a refusal rather than a blank page or a load in flight.
 expect(
-  "a non-operator opening the fragment sees no reports",
+  "a non-operator opening the fragment is told the reports couldn't load",
+  /Couldn't load these/.test(String(denied)),
+  String(denied).slice(0, 140),
+);
+expect(
+  "and is not also told they are still loading",
+  !/Loading…/.test(String(denied)),
+  String(denied).slice(0, 140),
+);
+expect(
+  "and no reports on it",
   !/calendar view/.test(String(denied)) && !String(denied).includes(NONCE),
   String(denied).slice(0, 140),
 );
@@ -271,11 +304,6 @@ const dots = `(async () => {
   const onAvatar = document.querySelectorAll('button[aria-label="You"] span.rounded-full.bg-accent').length;
   return JSON.stringify({ marks, onAvatar });
 })()`;
-// Measured with the menu OPEN, because "Feedback inbox" is the longest label
-// there and at the menu's old width it wrapped — which grew that one row a head
-// taller than its neighbours and left the label centred among left-aligned ones.
-// A label added later can do it again, so the shape is pinned rather than the
-// width.
 // SLACK, not whether anything wrapped — headless renders this text a shade
 // narrower than a real browser, so the wrap that shipped ("Feedback inbox" over
 // two lines, that row a head taller than its neighbours) could not be
@@ -348,8 +376,8 @@ expect("without taking the other one with it", stored.some((d) => d.fields?.text
 
 console.log("\nand opening it is what clears the dot");
 // Opening the inbox marked it seen, so coming back finds nothing waiting. This
-// is a reload rather than a fragment move: the mark is written on mount, and
-// the dot is drawn from a preference that has to travel back through its
+// is a reload rather than a fragment move: the mark is written once the reports
+// load, and the dot is drawn from a preference that has to travel back through its
 // listener.
 await page.go(APP, 9000);
 const after = JSON.parse(String(await page.evaluate(dots)));
@@ -394,6 +422,10 @@ expect(
 );
 
 await remove("feedback/seed_older");
+if (page.thrown.length) {
+  console.log("\npage exceptions and console errors:");
+  for (const trace of page.thrown) console.log(`  ${String(trace).split("\n")[0].slice(0, 300)}`);
+}
 chrome.kill();
 console.log(
   failures.length === 0

@@ -11,7 +11,6 @@ import {
   useState,
 } from "react";
 import { FaGoogle } from "react-icons/fa";
-import { LuLoaderCircle } from "react-icons/lu";
 import { PhoneAlreadySet } from "../utils/auth";
 import { auth } from "../utils/firebase";
 import { useKip } from "../utils/store";
@@ -25,6 +24,7 @@ import ReachField, {
   reachError,
   sendReach,
 } from "./reach-field";
+import Busy from "./ui/busy";
 import Button from "./ui/button";
 import Input from "./ui/input";
 import Sheet from "./ui/sheet";
@@ -80,6 +80,7 @@ export default function NameGateProvider({
   children: ReactNode;
 }): ReactElement {
   const {
+    user,
     profile,
     profileReady,
     anonymous,
@@ -92,6 +93,7 @@ export default function NameGateProvider({
   const [held, setHeld] = useState<{
     action: () => Promise<void>;
     label: string;
+    unprompted: boolean;
   } | null>(null);
   const [name, setName] = useState("");
   const [reach, setReach] = useState<ReachState>(EMPTY_REACH);
@@ -99,25 +101,30 @@ export default function NameGateProvider({
   const [busy, setBusy] = useState(false);
   const [sentTo, setSentTo] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The uid whose unprompted sheet was dismissed.
+  const [dismissedFor, setDismissedFor] = useState<string | null>(null);
 
-  const open = useCallback((action: () => Promise<void>, label: string) => {
-    setName("");
-    setReach(EMPTY_REACH);
-    setSentTo(null);
-    setError(null);
-    setHeld({ action, label });
-  }, []);
+  const open = useCallback(
+    (action: () => Promise<void>, label: string, unprompted = false) => {
+      setName("");
+      setReach(EMPTY_REACH);
+      setSentTo(null);
+      setError(null);
+      setHeld({ action, label, unprompted });
+    },
+    [],
+  );
 
   // A brand-new credentialed account — someone continuing on a new device, or a
   // Google arrival carrying no name — has no ask to hold and no friend request
-  // to accept, so nothing else would ever open this. Without it they land in the
-  // app permanently nameless, and every write pinned to their profile refuses.
+  // to accept, so nothing else would ever open this. Offered once per account:
+  // dismissing it sticks, and the next action that needs a name asks again
+  // through `runNamed`.
   useEffect(() => {
     // Only on the app's own routes. `/portal/` and `/continue/` render their own
     // sheets and reach that state legitimately — a Google sign-in returning no
     // name, a phone sign-in into a profileless account — where this would stack
-    // a second sheet that cannot be dismissed, since closing it re-opens it on
-    // the next render.
+    // a second sheet over theirs.
     if (typeof window !== "undefined" && ownRoute(window.location.pathname)) {
       return;
     }
@@ -126,8 +133,23 @@ export default function NameGateProvider({
     // just left what to call them, over the screen saying they were leaving.
     if (deletion) return;
     if (!profileReady || anonymous || profile?.displayName || held) return;
-    open(async () => undefined, "Continue");
-  }, [profileReady, anonymous, deletion, profile, held, open]);
+    if (!user || dismissedFor === user.uid) return;
+    open(async () => undefined, "Continue", true);
+  }, [
+    profileReady,
+    anonymous,
+    deletion,
+    profile,
+    held,
+    open,
+    user,
+    dismissedFor,
+  ]);
+
+  const dismiss = useCallback(() => {
+    setHeld(null);
+    setDismissedFor(user?.uid ?? null);
+  }, [user]);
 
   const askIdentity = useCallback(
     () => open(async () => undefined, "Continue"),
@@ -151,6 +173,12 @@ export default function NameGateProvider({
   // handed exactly that person a sheet with nothing in it.
   const needsReach = anonymous || !email;
   const reachInvalid = reachError(reach.raw);
+
+  // The name can arrive some other way (another tab, a sign-in carrying one),
+  // leaving an unprompted sheet with nothing to ask.
+  useEffect(() => {
+    if (held?.unprompted && !needsName && !needsReach && !busy) setHeld(null);
+  }, [held, needsName, needsReach, busy]);
   const invalid = name && needsName ? validateDisplayName(name) : null;
   const problem = invalid ?? reachInvalid ?? error;
   const message = "Only so kip can reach you. Nobody else sees it.";
@@ -278,7 +306,7 @@ export default function NameGateProvider({
       {children}
       <Sheet
         open={held !== null}
-        onClose={() => setHeld(null)}
+        onClose={dismiss}
         title={
           needsName ? "What should we call you?" : "Where can kip reach you?"
         }
@@ -312,6 +340,7 @@ export default function NameGateProvider({
                 value={name}
                 onChange={(event) => setName(event.target.value)}
                 placeholder="Your name"
+                aria-label="Your name"
               />
             ) : null}
 
@@ -328,20 +357,8 @@ export default function NameGateProvider({
               />
             ) : null}
 
-            {/* One line, under both fields and over the button, carrying the
-                reason for the address OR whatever is wrong. Two slots would
-                make the sheet grow and shrink as you type; one cannot. It is
-                the address that needs explaining, so with no address field
-                there is nothing to say and only a problem can speak.
-
-                Rendered whether or not it has anything to say, because a
-                bottom sheet grows UPWARD: a message that APPEARS rather than
-                swapping shoves the fields out from under the thumb typing
-                into them. Name-only mode has no standing copy, which is
-                exactly the mode that used to jump. One line is enough for
-                both — every string either slot can hold measures one at the
-                sheet's 350px, which is what the budget in
-                `tests/auth-copy.test.ts` keeps true. */}
+            {/* Always mounted so the sheet doesn't grow as messages appear;
+                one-line budget pinned by `tests/auth-copy.test.ts`. */}
             <p
               aria-live="polite"
               className={`min-h-5 text-sm leading-5 ${problem ? "text-danger" : "text-muted"}`}
@@ -362,7 +379,7 @@ export default function NameGateProvider({
               }
             >
               {busy ? (
-                <LuLoaderCircle className="animate-spin" />
+                <Busy label={held?.label ?? "Continue"} />
               ) : (
                 (held?.label ?? "Continue")
               )}

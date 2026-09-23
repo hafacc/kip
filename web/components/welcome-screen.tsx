@@ -6,15 +6,6 @@ import SiteFooter from "./site-footer";
 import ThemeButton from "./theme-button";
 import Wordmark from "./wordmark";
 
-// Everyone who belongs on kip was invited by a person, so there is nobody here
-// to persuade. The page confirms that this is the thing their friend meant and
-// gets out of the way: one screen, one object to act on, nothing to scroll past.
-// The smallness is the argument — a feature list would be selling something the
-// visitor was already given.
-//
-// Pure render, deliberately: it never touches the fragment, so someone who
-// opened a link to a room while signed out lands on that room the moment the
-// door opens, off the stack the store already seeded.
 export default function WelcomeScreen(): ReactElement {
   return (
     <div className="flex min-h-dvh flex-col">

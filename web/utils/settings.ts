@@ -22,12 +22,8 @@ function epoch(value: unknown): number | null {
   return value instanceof Timestamp ? value.toMillis() : null;
 }
 
-// The probe stamps are plain clock readings, not server timestamps: the client
-// picks the value and the trigger writes the SAME one back, so "still checking"
-// is one comparison and needs no clock agreement between the two. Reading them
-// through `epoch` returned null for every one of them, which left the spinner
-// unable to persist and the "still blocked" line unable to render at all —
-// the one message that stops the button looking like it did nothing.
+// Plain numbers the client picks and the trigger echoes back, compared without
+// clock agreement.
 function millis(value: unknown): number | null {
   return typeof value === "number" ? value : epoch(value);
 }
@@ -39,7 +35,11 @@ export function watchPrefs(
   return onSnapshot(
     doc(db(), "users", uid, "settings", "prefs"),
     (snap) => {
-      const data = snap.data();
+      // Estimated, because `feedbackSeenAt` and `smsConsentAt` are written with
+      // serverTimestamp() and read as null until the write lands — clearing
+      // the unread mark and the consent for a beat, on the tap that set them.
+      // The server's value replaces the estimate on the next snapshot.
+      const data = snap.data({ serverTimestamps: "estimate" });
       onChange(
         data
           ? {
@@ -161,9 +161,6 @@ export async function stopTexts(uid: string): Promise<void> {
   );
 }
 
-// One kind at a time, once the consent above has been given. It writes no
-// consent of its own and clears no STOP: those are the master switch's, and a
-// row here can only narrow what it turned on.
 // Asks the sender to try one text NOW, rather than waiting for whatever kip
 // would have texted about next. It is a WRITE and not a call: the answer arrives
 // on the prefs listener the app already holds, so nothing here sits in a request
@@ -179,6 +176,9 @@ export async function requestTextCheck(uid: string, at: number): Promise<void> {
   );
 }
 
+// One kind at a time, once the consent above has been given. It writes no
+// consent of its own and clears no STOP: those are the master switch's, and a
+// row here can only narrow what it turned on.
 export async function setTextNotify(
   uid: string,
   kind: NotifySmsKind,

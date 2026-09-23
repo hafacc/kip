@@ -132,6 +132,7 @@ export default function FriendsPanel(): ReactElement {
                 if (event.key === "Enter") find();
               }}
               placeholder="username"
+              aria-label="Username"
               prefix="@"
             />
           </div>

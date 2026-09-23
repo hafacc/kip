@@ -125,6 +125,7 @@ export default function SavedSearches({
           <Input
             ref={field}
             placeholder={suggestion}
+            aria-label="Name for this search"
             value={label}
             onChange={(event) => setLabel(event.target.value)}
             onKeyDown={(event) => {

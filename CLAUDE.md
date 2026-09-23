@@ -51,18 +51,23 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
 ## Design decisions
 
 - **No server in the request path.** Every user-facing action — public share links included — runs
-  client + rules, with `firestore.rules` as the sole enforcement. `functions/` holds exactly one
-  thing, notification email, which never sits between a user and their data: it reacts to writes
-  that already happened. It earns its place because it needs the Admin SDK to read an address off
-  the Auth account, which is what keeps email out of Firestore. Treat any OTHER proposed function as
-  a claim to disprove, not a default.
+  client + rules, with `firestore.rules` as the sole enforcement. `functions/` holds only work
+  that never sits between a user and their data — notification email, the reaper, the leaving
+  teardown and the text check, each reacting to a write that already happened or to a clock — and
+  each earns its place by needing something rules can't do (see *Cloud Functions*). Treat any OTHER
+  proposed function as a claim to disprove, not a default.
 - **A rename heals every copy of your name.** Friend edges carry `displayName`/`photoURL` so
   rendering a friends list costs zero extra reads — but nothing else can reach into another user's
   friends list, so that copy was previously stale forever (there was no `update` verb on the edge at
-  all). The rule now lets you rewrite **the entry describing YOU**, name and photo only, and
-  `updateDisplayName` fans that out across your friends in one batch alongside `propagateProfile`
-  for share links. Write-on-rename, not read-on-render. The handle is immutable so it never drifts,
-  and booking copies are deliberately frozen (a record of the time).
+  all). The rule now lets you rewrite **the entry describing YOU** — name, photo and handle only,
+  each checked against your committed profile — and `updateDisplayName` fans that out across your
+  friends (`healFriendEdges`) alongside `propagateProfile` for share links. Write-on-rename, not
+  read-on-render. **All three fields go every time**, because an edge written before you claimed a
+  handle holds `''` and a heal leaving `username` out would be refused; claiming a handle heals the
+  edges too, which is the one moment a handle changes (it is set once and never again). Heals go in
+  batches of 500, Firestore's cap, and a chunk that fails is retried edge by edge, so one missing
+  reverse edge (an unfriend landing mid-heal) is skipped rather than failing everyone else's. Booking
+  copies are deliberately frozen (a record of the time).
 - **Bijective, denormalized friendship.** Becoming friends writes a doc into BOTH users'
   `friends` subcollections. Visibility checks ("can this user see this listing?") are then a
   single `exists(/users/$(ownerId)/friends/$(uid))` in rules — no graph traversal, no server.
@@ -146,8 +151,10 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
      `!user || anonymous`, on the reasoning that a ticket is not an account. It no longer holds:
      an anonymous account can carry a display name, a live ask and friendships, and every rule it
      meets is blind to how it signed in. `app/page.tsx` gates on `!user` alone. What replaced the
-     old reasoning is `displayName` — `AuthMenu` hides until there is one, because a nameless
-     visitor has no profile to show. The one thing still withheld is the EXIT: signing out of an
+     old reasoning is `displayName` — `AuthMenu` hides for an ANONYMOUS session until there is one,
+     because a nameless visitor has no profile to show. A nameless account with a credential keeps
+     the menu, since Settings and the exit live only there and the name sheet can be dismissed. The
+     one thing still withheld is the EXIT: signing out of an
      account with no credential destroys it, so `signOut` refuses without `force` and only the
      Settings row (behind a confirm) passes it.
 
@@ -320,18 +327,27 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   schema that never decayed. `stayPermitsSight` therefore reads the date itself (`endedWithin`,
   60 days after checkout, the same ISO parsing as `stillCurrent`), which needs no state machine: a
   pointer issued while a stay was fresh simply stops matching, with no sweep and nothing to revoke.
+  The store's counterpart lookup mirrors it (`endedWithin` and `STAY_SIGHT_DAYS` in
+  `utils/format.ts`), in UTC like the rule rather than the local date the rest of the client uses,
+  since its whole job is predicting what the rule will allow — a pointer it can't use would leave the
+  name unresolved.
 
   It also covers the other direction: a **REQUESTED** stay lets the HOST look up the GUEST, one way
   only. Confirming a stranger called "Someone" is the moment identity matters most, and asking to
   stay is initiating contact exactly as a connect request is — but being asked is not consent to be
-  looked up, so the guest gets no matching read until the stay is confirmed.
+  looked up, so the guest gets no matching read until the stay is confirmed. And only while the ask
+  is still answerable: once its dates pass (`stillCurrent`, the same check asking and confirming
+  make) it stops granting sight, since an ask nobody can confirm has no identity question left in it.
 
   The **Cloud Functions** can't hop (a trigger has no session) but run as admin, so they read both
   profiles directly when building a notification.
 
   **A booking's status machine is enforced, not just its fields.** The update rule pins which keys
   may change AND the transition graph: CANCELLED is an ending, CONFIRMED is reachable only from
-  REQUESTED, and REQUESTED is a birth state that nothing returns to. Without the first two an
+  REQUESTED, and REQUESTED is a birth state that nothing returns to — an update may only write
+  `CONFIRMED` or `CANCELLED`. **Every cancel is stamped**: it must set `cancelledBy` to the caller
+  and a `cancelReason` from the five kip writes, and every other update leaves both unchanged, so a
+  confirm can't smuggle a stamp in and a cancel can't go out unattributed. Without the first two an
   ordinary race walked straight through — a guest withdraws, the host's screen still says Pending,
   the host taps Confirm, and `confirmBooking`'s transaction (which read only the WINDOW) committed a
   stay that had been taken back. It now re-reads the booking too, so the honest "no longer
@@ -346,26 +362,40 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   holds uids, each party may add only their own, only once the booking is CANCELLED, and nobody can
   remove anyone else's — so the client must `arrayUnion`, since replacing the list drops the other
   party and the rule refuses it. The store filters on it at the two subscriptions, so every surface
-  honours it without each one remembering to. Friendship is asked for separately, and the friend-edge rule requires a `connectRequests`
+  honours it without each one remembering to — and only for a CANCELLED booking, mirroring the
+  rule, so a live stay carrying a stray uid is still shown rather than vanishing while it binds
+  someone. Friendship is asked for separately, and the friend-edge rule requires a `connectRequests`
   doc, so a host can't conscript a guest into it by confirming their stay.
 
-  **Every identity copy is pinned to the real profile — requests, bookings AND friend edges.** The
-  friend edge is the longest-lived of them: unpinned, an accepter could install themselves in the
+  **Every identity copy is pinned to the real profile — requests, friend edges AND share links.**
+  The friend edge is the longest-lived of them: unpinned, an accepter could install themselves in the
   sender's list under any name, or wearing a handle registered to someone else, in a list nobody has
-  reason to re-check. `edgeMatchesWriter` covers both the accept write and the heal-on-rename
-  update. Note scoping WHICH fields may change is not the same as checking their values — the heal
+  reason to re-check. `edgeMatchesWriter` covers the accepter writing into the sender's list and the
+  heal-on-rename update. The edge in your OWN list is pinned the other way (`edgeMatchesAsker`): it
+  needs the pending request from that person and must carry the request's name, handle and photo —
+  themselves pinned to the asker's profile — so an asker can't plant an edge on their own side at
+  all. Note scoping WHICH fields may change is not the same as checking their values — the heal
   rule pinned the fields and still allowed renaming yourself to "kip Support" in every friend's list.
   Because rules read committed state, `updateDisplayName` must write the profile FIRST and the edges
   second; one batch would check the new name against the old.
 
-  **The sender's identity on a request is pinned to their real profile.** `fromName`/`fromUsername`
-  are copied because the two parties may not be able to read each other — which also means the
+  A portal's `ownerName`/`ownerPhotoURL` are pinned the same way (`portalOwnerCopyTrue`), and for
+  the same reason: a share-link visitor can't read the owner's profile to check them. So
+  `spreadIdentity` writes the profile first and the portals second. Its owner, scope and `listingId`
+  are fixed at birth — a link handed to someone else would open a connect route to a person who never
+  shared one. **The one unpinned copy is a SLOT link's room shell** (`listings`), since rules can't
+  check inside a list of maps; it only ever describes the owner's own place to a visitor.
+
+  **The sender's identity on a request is pinned to their real profile.** `fromName`/`fromUsername`/
+  `fromPhotoURL` are copied because the two parties may not be able to read each other — which also means the
   RECIPIENT can't check them, and they go straight into a notification email. So the rules require
   them to equal the sender's actual `users/{uid}` values. (A booking needs no such pin: it carries
   no names at all, only the `knownBy` hop.) Left free,
   anyone could ask to connect as "Chase Fraud Alert (@chase_support)" or simply wear another kip
-  user's handle. Booking create also pins `cancelledBy`/`cancelReason` to null, so a stay can't be
-  lodged pre-stamped as cancelled by the host.
+  user's handle. Booking create pins what it can for free: the key set, `cancelledBy`/`cancelReason`
+  to null (so a stay can't be lodged pre-stamped as cancelled by the host), `hiddenBy == []` and
+  `createdAt == request.time`. Free matters, because a share-link ask already spends exactly the 10
+  lookups a single-document write is allowed.
 
   **`connectRequests` is "let's be friends", nothing else.** Three routes in — found by handle (the
   recipient is `searchable`); arrived via a link (`portalId`, which also marks it so the card can
@@ -373,7 +403,10 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   order-free by `bookingJoins`). That third one exists because a share-link guest and their host are
   the one pair who demonstrably know each other and the one pair neither of the others can serve —
   neither is searchable to the other, and neither holds the other's link. `${from}_${to}` is the
-  right key here: one pending friendship ask per pair. `utils/requests.ts` owns it.
+  right key here: one pending friendship ask per pair. `utils/requests.ts` owns it. **A route that
+  is NAMED must hold even when another would have done**: a `portalId` or `bookingId` on the request
+  is checked even for a searchable recipient, since the card says "via your link" or "you stayed
+  together" on the strength of it.
 
   **The route is re-checked on re-send, not just on send** (`requestRouteOpen`, called from both
   `create` and `update`). Re-asking overwrites the same doc id, so without that a request that
@@ -405,7 +438,8 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   1. `users` read is `self || friend || searchable` (`list: if false` as before, so the table still
      can't be scraped). A private account is indistinguishable from a nonexistent one.
   2. `connectRequests` create requires the *recipient* to be `searchable` — unless the sender names
-     a live share link of theirs (`portalId`), the other legitimate route in. Going private stops
+     a live share link of theirs (`portalId`) or a stay the two share (`bookingId`), the other
+     legitimate routes in. Going private stops
      inbound requests from anyone who merely holds your uid.
   3. `users` write refuses `searchable: true` without a `username` — being findable and having a
      handle are one decision, enforced server-side.
@@ -431,13 +465,17 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   what makes going private reversible: your name can't be released and re-squatted while you're
   unsearchable, so you can flip searchability back on and still be yourself. (The Settings claim
   flow confirms this before writing.) **Uniqueness is functionless:** `claimUsername`
-  (`utils/username.ts`) writes the registry entry FIRST, then the profile; a collision hits the
-  registry's owner-only `update` rule and is denied, so the profile write never happens.
+  (`utils/username.ts`) writes the registry entry and the profile in ONE batch; a collision hits the
+  registry's owner-only `update` rule and is denied, taking the profile write down with it. **The
+  batch is required, and it is what caps an account at one handle:** the registry refuses an entry
+  the profile doesn't name once the commit lands (`getAfter`), and a profile's handle can only go
+  from empty to set. Without both, an account could walk through the registry parking one permanent
+  name after another.
   **Format + reserved-name checks are enforced in the rule** (`handle.matches(...)` + a denylist),
   so a crafted client can't grab `@admin`. **The displayed handle is bound to the registry:** the
   `users` write rule requires `usernames/$(username).uid == userId`, so a profile can't show a
-  handle it never claimed. An idempotent owner-only registry `update` lets an interrupted claim be
-  retried. The display name IS editable (Settings → Account).
+  handle it never claimed. An idempotent owner-only registry `update` lets a claim of your own
+  handle be re-run. The display name IS editable (Settings → Account).
 
   Consequence worth knowing: `acceptRequest` takes the requester's name/handle/photo off the
   **request doc** (already denormalized) rather than reading their profile — that read used to
@@ -502,7 +540,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   reason: otherwise an owner could birth one already `BOOKED` naming anyone as the holder, handing
   them a standing read of it.
 
-  Together with the booking-update rule allowing only `status` to change, that gives the invariant
+  Together with the booking-update rule allowing only `status` (and its cancel stamps) to change, that gives the invariant
   **you get the nights you asked for, or nothing** — enforced in rules, needing no client
   cooperation. The pending-cancel above is courtesy notification, not integrity: a stale ask is
   inert, since it can never be confirmed onto moved dates.
@@ -561,9 +599,8 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   nothing else failing.
 
   Knock-on effects worth knowing: `slotHandedTo` now pins the exact booking rather than its guest
-  (tighter — one guest's second ask can't be answered with a slot promised to their first); the
-  seed derives `bookingId` from `BOOKINGS` instead of declaring a holder, so a fixture has nothing
-  left to contradict itself about; and a friend's stay shows dates but only names the PLACE when
+  (tighter — one guest's second ask can't be answered with a slot promised to their first); and a
+  friend's stay shows dates but only names the PLACE when
   the viewer can also read that listing, which is right — the host has a privacy interest here too.
 - **Window status is owner-only; bookings drive it.** A guest can't write a listing's `windows`
   (rules), so requesting a booking only creates the `bookings` doc (`OPEN` stays `OPEN`). The
@@ -573,8 +610,16 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   clear `bookingId`) — a rule clause lets the booker, and only the booker, do that release. A
   pending `REQUESTED` booking left the window `OPEN`, so guest cancel there just marks the booking
   `CANCELLED` (see `utils/bookings.ts`). Windows carry a free-form `details` string (not tags).
-- **Dates that have been and gone stop being availability.** A slot is live while `end >= today`
-  (`isExpired`, `utils/format.ts`) — the same boundary Trips uses to split upcoming from past, so a
+
+  **Taking or freeing a slot travels with the booking's own transition, in the same commit, for
+  guest and host alike.** A slot's status is `OPEN` or `BOOKED` and nothing else. Marking it
+  `BOOKED` needs a booking arriving `CONFIRMED` for that slot (`bookingConfirmedOnto`, via
+  `getAfter`) — the owner included, so a host can't mark dates taken with no stay behind them.
+  Freeing a `BOOKED` slot needs its booking to end `CANCELLED` in the same commit
+  (`stayEndedWith`), unless that booking no longer exists, since then there is nothing left to end.
+  Otherwise the stay stays `CONFIRMED` on nights the slot is now offering to someone else.
+- **Dates that have been and gone stop being availability.** A slot is live while `end >= today`,
+  today being the LOCAL date (`isExpired`/`todayIso`, `utils/format.ts`) — the same boundary Trips uses to split upcoming from past, so a
   slot and a stay stop being current on the same day. Nothing else ages a window out: `status` only
   ever says OPEN or BOOKED, so without this a slot from last year stayed bookable forever, offered
   in Browse, on a place card, in a friend's view of a room, and through a share link. Filtered in
@@ -598,14 +643,18 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   Comparing an ISO string against `request.time` turns out to be clean enough (`split` + `int` +
   `timestamp.date`), and the boundary is deliberately **yesterday in UTC**, because `request.time` is
   UTC while `isExpired` is local — anyone west of UTC would otherwise be refused an edit the UI had
-  just offered them. A slot that already carries a share link keeps its Sharing block once expired,
+  just offered them. That slack is what lets the client use the local date at all: `toISOString`
+  would put someone west of UTC a day ahead of their own calendar after late afternoon. A slot that
+  already carries a share link keeps its Sharing block once expired,
   or removing the whole slot would be the only way to revoke a token that's still live.
 - **A taken slot reads "Booked", it doesn't disappear.** A slot-scope link always shows the slot it
   points at, whatever its state — if someone else got there first, the person you sent it to sees
   that it went rather than an empty page. Wider links list what's free and drop taken dates.
 - **Dates going away take their asks with them.** Cancelling a slot (`cancelWindowAsOwner`) and
   deleting a whole listing (`deleteListing`) both cancel every live booking against them — pending
-  asks included — in the same batch. Only FUTURE ones: a stay that already happened stays
+  asks included — in the same batch. (A listing past 500 writes goes in ordered batches instead —
+  stays, then slots and links, then the listing LAST, since the slot rules read its owner — and a
+  retry re-derives everything.) Only FUTURE ones: a stay that already happened stays
   `CONFIRMED`, so clearing an old slot off your calendar doesn't retroactively cancel a visit or
   tell the guest their stay was called off after they'd been. Otherwise a guest is left holding a request, or a confirmed
   stay, against dates that no longer exist and nobody can cancel.
@@ -614,7 +663,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   decline/cancel above, which reopens the window for a single booking. There is no bare
   delete-window path: the store's `cancelWindow(listingId, windowId)` gathers the window's
   bookings from its live `incomingBookings` and routes through this, so a booked slot's booking
-  is never orphaned. Cancelled guests get a `slot-cancelled` notification (stubbed, see below).
+  is never orphaned. Cancelled guests are told by email (`SLOT_CANCELLED`, see Notifications).
 - **Auto-accept = first come, first served.** An owner can mark a window `autoAccept`. Booking
   such a window skips approval: `requestBooking` runs a Firestore **transaction** that re-reads
   the window and, only if still `OPEN`, atomically sets it `BOOKED` and writes a `CONFIRMED`
@@ -626,13 +675,21 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   `bookingArrivingWith` uses `getAfter` to require a `CONFIRMED` booking for this caller on this
   slot, the mirror image of `slotHandedTo` checking the same pair from the booking's side. The
   flip used to stand alone, which let a friend mark any auto-accept slot taken without ever asking
-  for it: no booking, nothing for the host to decline, and the dates gone. Owners still write
-  windows freely (`create`/`delete`/`update`). Non-auto
+  for it: no booking, nothing for the host to decline, and the dates gone. Owners still create,
+  delete and edit windows, bound only by the freezes above and by status travelling with a booking.
+  Non-auto
   windows keep the manual REQUESTED → owner-confirm flow. `setWindowAutoAccept` (owner-only)
   toggles the flag on an existing open window.
+
+  **Either way the slot is re-read first and compared with what was shown**, because friends' dates
+  are fetched rather than live and a stale copy is ordinary. If it has moved, been removed, passed,
+  or (for an instant grab) stopped being instant, `requestBooking` returns `"changed"` rather than
+  letting the rules answer with a bare permission-denied, and the slot row refreshes the room's
+  dates and says so — a retry offered on stale dates could only be refused again. A failed read
+  answers nothing, so a plain ask then goes ahead and Firestore queues it.
 - **Search is client-side.** Each user only sees friends' listings (a small set), so Browse
   fetches all friends' listings + windows once (`fetchFriendListings` chunks the `in` filter at
-  30 uids) and filters by date/type/distance in `utils/search.ts`. This sidesteps Firestore's
+  20 uids, `BROWSE_CHUNK` — the rules' lookup budget, see above) and filters by date/type/distance in `utils/search.ts`. This sidesteps Firestore's
   inability to combine a geo range with a date range, and keeps `firestore.indexes.json` empty.
 - **Counting a saved search costs no reads, which is the whole reason it exists.** `refreshBrowse`
   runs in the store provider on mount, unconditionally — so every screen already holds every
@@ -685,8 +742,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   special-case forever. Opening a search marks it seen, since its results are then on screen.
 
   Consequence worth knowing: a search you create yourself is seen as of now, so **nothing can be new
-  until a slot is added after that moment** — which is why `seed.ts` writes one with an older
-  `lastSeenAt` beside a slot added yesterday. It's the only route to that badge.
+  until a slot is added after that moment**. It's the only route to that badge.
 
   Deliberately **no notification** — see the digest note under Known limitations.
 - **Geohash for distance.** Listings store a `geohash` (via `geofire-common`) computed from
@@ -834,6 +890,11 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   StrictMode remounts, the second run is correctly refused by `spent`, and a teardown that muted the
   first threw away the only answer and its timer, leaving the page on "working" for ever. Dev-only,
   so only `check:host` — which waits for the redirect instead of navigating itself — ever sees it.
+  **A success is the exception: it belongs to every attempt** (`finished`). A retry after a stall
+  resends a code the stalled call may yet spend, so the retry's refusal can arrive before or after
+  the success it lost to, and whichever succeeds wins. A RETURNING link that fails or stalls says so
+  and offers **Open kip** (plus **Try again** on a stall), rather than stranding someone on a page
+  with no way into the app.
 
   **The code step is six boxes over ONE input, and the count is the point.** `components/ui/code-input.tsx`
   draws six boxes wearing `Input`'s own shell and lays a single transparent `one-time-code` field
@@ -867,12 +928,15 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   `app/page.tsx` gates in order: `authReady` splash → **`WelcomeScreen`** (no session at all) →
   `profileReady` splash → the app. There is **no onboarding screen**: a missing display name is
   collected by the identity sheet (`components/name-gate.tsx`, and the portal page's own copy) at
-  the first action that puts your name in front of someone, so nothing blocks. `AuthMenu` renders
-  once there is a name, minus the exit — see the sign-out note in the anonymous bullet.
+  the first action that puts your name in front of someone, so nothing blocks. A credentialed
+  account with no name is offered that sheet unprompted **once per account**: dismissing it sticks,
+  and after that only an action that needs a name brings it back. `AuthMenu` hides only for a
+  nameless ANONYMOUS session, and withholds the exit from an account with no credential — see the
+  sign-out note in the anonymous bullet.
 - **Leaving is possible, it dismantles rather than departs, and the SERVER finishes it.** The client
   writes one document — `deletions/{uid}`, `utils/leave.ts` — and `onAccountDeletionRequested`
   (`functions/src/index.ts`, `functions/src/teardown.ts`) tears the account down with the Admin SDK
-  in five named phases: cancel every live stay in both directions, delete the places (photos,
+  in five named phases: cancel every future stay in both directions, delete the places (photos,
   slots, guest pointers), unfriend both sides and delete requests both ways, then prefs, saved
   searches, share links, the avatar and the profile, then the Auth account. The document is deleted
   last, and its absence is the only completion signal there is.
@@ -915,13 +979,18 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
 
   **Every step is a no-op on what is already gone**, because retries mean it runs again over a
   partly dismantled account: a cancelled booking is skipped, a missing document deletes cleanly, and
-  a deleted Auth account answers `user-not-found`. Two things it does that the client couldn't:
+  a deleted Auth account answers `user-not-found`. **A stay whose checkout is today counts as
+  finished** and is left alone — `end` is exclusive, so every night has been had, and "cancelled"
+  would tell someone their trip was called off after they had been on it. The server has no local
+  day, so that boundary is UTC. **A slot is handed back only while it still holds the booking being
+  cancelled**, read in the same transaction: a host may have deleted it out from under the stay, or
+  it may now hold someone else's, and neither is the leaver's to release. Two things it does that the client couldn't:
   every portal is found by query (`portals` is `allow list: if false`, so the browser could only
   delete the one id it had stored), and the Auth account goes without `auth/requires-recent-login` —
   the special case that used to strand people in front of advice they couldn't follow.
 
-  **`users` has no client `delete` verb at all any more.** It existed solely so browser-side leaving
-  could work; leaving one behind would let a client delete its own profile WITHOUT asking for the
+  **`users` has no client `delete` verb at all any more** — the profile and its `settings` both
+  grant `create, update` and nothing else. It existed solely so browser-side leaving could work; leaving one behind would let a client delete its own profile WITHOUT asking for the
   teardown, which is the half-dismantled account again. `deletions` is create-and-read-your-own,
   with no list (who is leaving is nobody's business) and no client update — the phase is the
   function's word — and no client delete WHILE IT IS RUNNING, since clearing it then would abandon a
@@ -940,7 +1009,9 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   all. `app/page.tsx` renders this AHEAD of the profile gate — the teardown deletes the profile
   partway through, and the other reading of a missing profile is onboarding, which would put someone
   who asked to leave in front of a form asking their name and write it back. `deletionReady` is what
-  stops the app being drawn in the beat before that document is answered for.
+  stops the app being drawn in the beat before that document is answered for. It resets only when
+  the uid changes, never on a `generation` re-attach, for the same reason `profileReady` doesn't:
+  `page.tsx` splashes while it is false.
 
   **Failure is capped and says so.** Five attempts, counted in the document before the work so a run
   that takes the process with it still spends from the budget; past that the function writes `error`
@@ -1048,7 +1119,12 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   `text-base` (≥16px so iOS Safari doesn't zoom on focus) on a **white surface with the only
   visible border + an accent focus ring**. `Sheet` is the shared modal surface (bottom sheet on
   mobile with a drag-handle bar + `rounded-t-3xl`, centered `rounded-3xl` card on ≥sm; backdrop +
-  Escape dismiss, scroll-lock); the dialog renders through it. **It renders through a PORTAL onto
+  Escape dismiss, scroll-lock); the dialog renders through it. **It manages focus**: opening moves
+  focus into the sheet (unless a child's `autoFocus` already has), closing restores it to whatever
+  opened it, and Tab is trapped inside. Open sheets form a stack, and Escape and Tab belong to the
+  TOP one only, since a confirm raised over a sheet is its own sheet. A button that is working swaps
+  its label for a spinner through `components/ui/busy.tsx`, which keeps the label `sr-only`, or the
+  button is announced with no name at all. **It renders through a PORTAL onto
   `<body>`, and that is load-bearing rather than tidy:** `fixed` resolves against the viewport only
   while no ancestor is a containing block, and `backdrop-filter` makes one — so the desktop `TopBar`,
   which is blurred, trapped a sheet opened from `AuthMenu` inside itself and collapsed it to a
@@ -1108,7 +1184,16 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   `DialogProvider` + `useDialog()` returning async `confirm()` / `alert()` (mounted in
   `layout.tsx` around the app). The async API mirrors a native action sheet/dialog, and the UI is
   a **bottom sheet on mobile, centered card on desktop**. All destructive actions (delete
-  listing, unfriend, cancel slot) route through it; nothing calls `window.confirm`/`alert`.
+  listing, unfriend, cancel slot) route through it; nothing calls `window.confirm`/`alert`. Enter
+  confirms only when focus is NOT on a control, since a focused button answers Enter itself —
+  otherwise Enter on a focused Cancel would confirm. **A failed action is always said, never only
+  logged**: `useAction` runs a fire-and-forget action and turns its rejection into a "That didn't
+  work" dialog, and `useFailure` does the same for handlers that hold their own busy state.
+
+  `app/error.tsx` is the render-crash boundary: "This page couldn't load", with Reload and a Home
+  link that is a full page load, because the app is one route and a router push to it from inside
+  it would leave the boundary standing. Next's own fallback would link to `/`, which under a base
+  path is outside kip altogether.
 - **Every screen has a URL, in the fragment.** `#/`, `#/browse`, `#/person/<uid>`,
   `#/room/<id>`, `#/room/<id>/slot/<windowId>`, `#/room/<id>/edit`, `#/new-place`,
   `#/booking/<id>` — `screenHash`/`screenForHash` in `utils/store.tsx` are an inverse pair and the
@@ -1197,8 +1282,8 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   enough.
 
   **The fragment is guessable and that is fine.** `#/feedback` renders for anybody; every read
-  behind it is refused, so what a stranger gets is an empty list, which `check:feedback` asserts
-  rather than assumes.
+  behind it is refused, so what a stranger gets is "Couldn't load these" and no reports, which
+  `check:feedback` asserts rather than assumes.
 
   **The menu is `w-56` and every row is `whitespace-nowrap`, and both are load-bearing.** At `w-48`
   "Feedback inbox" had exactly ZERO pixels of slack — it fit only while font metrics agreed to the
@@ -1275,10 +1360,10 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
 ## Notifications (email, sent by Cloud Functions)
 
 `functions/src/messages.ts` decides WHAT to say and to WHOM — pure, no Firebase — and
-`functions/src/index.ts` holds the four Firestore triggers plus the I/O (resolve an address from
+`functions/src/index.ts` holds the four notification triggers plus the I/O (resolve an address from
 Auth, read preferences, send). They're split because the triggers need emulators, real Auth accounts
 and an SMTP server to exercise, so in practice they were never run at all; the decisions need none
-of that and are covered by `web/tests/notifications.test.ts` (74 cases, incl. the two mirror-image
+of that and are covered by `web/tests/notifications.test.ts` (89 cases, incl. the two mirror-image
 cancellations, which are the easiest pair to get backwards).
 
 Each notice carries a **`path`, a `cta` label and the OTHER party's `person`**, so every email links
@@ -1290,9 +1375,12 @@ solid of the same family so a client that drops `background-image` still shows a
 
 **A photo is attached inline (CID), never linked.** A kip-hosted avatar's URL is an unguessable
 bearer capability, and a remote image in an email is fetched — and cached — by the recipient's
-client, so a URL in the body hands that capability out. `index.ts` fetches the bytes instead
-(https-only, 5s timeout, image content types, 512KB cap checked against the buffer as well as the
-header) and nodemailer embeds them; the tests pin that no URL appears in either part. A Google
+client, so a URL in the body hands that capability out. `index.ts` fetches the bytes instead and
+nodemailer embeds them. The fetch is bounded on every axis because the URL comes off a user's own
+profile: only kip's own Storage bucket or `lh3.googleusercontent.com` (`photoFetchable`, the same
+two origins `photoSrc` renders), redirects refused so neither can bounce it elsewhere, a 5s
+timeout, image content types, and a 512KB cap counted while downloading, since `content-length`
+can lie or be absent; the tests pin that no URL appears in either part. A Google
 account photo is already public but goes down the same path, so there's one code path, not two.
 Every failure degrades to an initial in a circle and never fails the send. **Nothing is client-triggerable**: a client
 can't ask for an email at all, only cause a real state change that warrants one.
@@ -1326,7 +1414,10 @@ drawn before it answers is a guess, and it was wrong for anyone who had already 
 now read in that same `Promise.all` rather than off the store's live `friends` — one answer arriving
 at one moment, no second readiness flag, and consistent with a page where nothing else is live
 either. A signed-out visitor skips it entirely: they have no edge and no request, so the ask is live
-from the first paint, which is the visitor this page is for.
+from the first paint, which is the visitor this page is for. **A lookup that fails offers the ask**
+rather than leaving the control on `unknown`, which has nothing on it at all: a redundant ask is
+refused or harmless. And an ask refused because its slot was taken, moved, removed or has passed
+reloads the page's dates, since the ones on screen are exactly what just proved stale.
 
 A decline sends nothing, deliberately: the person who asked learns it by the row disappearing, and
 "they said no" is not a message worth delivering to an inbox.
@@ -1338,10 +1429,12 @@ harassment channel. And it structurally couldn't express a connect request, whic
 authorise against. There is now no `mail` collection at all.
 
 **Attribution is stamped, because a trigger can't see who wrote.** Cancelling sets `cancelledBy` and
-`cancelReason` on the booking; the rule permits those two fields alongside `status` and requires
+`cancelReason` on the booking; the rule requires both on every cancel, with
 `cancelledBy == request.auth.uid`, so you can only ever stamp yourself. That's what lets one update
 trigger tell "declined" from "the host moved those dates" from "your stay was called off" — very
-different messages to the person receiving them.
+different messages to the person receiving them. **A cancellation that doesn't say who cancelled,
+or names neither party, sends nothing** — every message says who did it, and a guess would send one
+to the person who actually did. (The Admin SDK teardown is outside the rules, and stamps too.)
 
 **Addresses never touch Firestore.** The function resolves one per send via
 `admin.auth().getUser(uid)`, uses it in memory, stores nothing. That's why this is a direct send
@@ -1547,8 +1640,10 @@ And submitting mid-upload would create the place without the photo still on its 
 reports `onBusyChange` and the button waits.
 
 **The URL is the capability, and the Firestore listing read is the gate.** `firebase/storage.rules`
-is now two lines — `uid == ownerId`, with the owner in the object path — and makes **no**
-cross-service calls at all. Everyone else renders a photo by following the unguessable download URL
+says only two things — `uid == ownerId`, with the owner in the object path, and an upload must be
+an `image/*` under 5 MB — and makes **no** cross-service calls at all. The cap is generous on
+purpose: the browser's own re-encode lands well under a megabyte, so it only bounds what a crafted
+client can park in the bucket. Everyone else renders a photo by following the unguessable download URL
 carried on the listing, so who may see a photo is decided by who may read the listing, which
 `firestore.rules` already expresses six ways (owner, friend, confirmed guest, room link, profile
 link, slot link).
@@ -1588,8 +1683,10 @@ same compile by hand, for when only the worker has changed.
 both — measured, not assumed, and two reviews of this disagreed about it — so caching the request as
 it arrives writes a portal capability and a one-time sign-in code into Cache Storage, which has no
 expiry, is readable by any same-origin script, and outlives the revocation meant to kill them. The
-key is the PATH alone, forced to a trailing slash to match `trailingSlash: true`. `check:pwa` opens
-`/portal/#token` and `/continue/?oobCode=…` and asserts neither reaches a cache key.
+key is the PATH alone, forced to a trailing slash to match `trailingSlash: true` — and the response
+is stored as a fresh `Response` with no URL on it, since a cloned response carries the URL it came
+from, query and all, into Cache Storage. `check:pwa` opens `/portal/#token` and
+`/continue/?oobCode=…` and asserts neither reaches a cache key.
 
 **The entry point is pre-cached and everything else is bounded.** Registration is deferred to `load`,
 so the visit that INSTALLS the worker is never seen by it — without pre-caching the scope root,
@@ -1633,6 +1730,10 @@ service worker makes, so it watched the shell render over the live network and c
 It passed with the entire offline fallback deleted. It does not cover a signed-in kip offline: that
 is Firestore's persistence, which needs a real session.
 
+The export it builds talks to the REAL project, so the check fails every Firebase Auth request in
+the browser and asserts the share link's anonymous sign-up was attempted and blocked: without that,
+every run left an account in production.
+
 ## Web build
 
 `cd web && bun install`, and `cd functions && npm install` once (a separate package on the Node
@@ -1645,15 +1746,17 @@ site in `web/out/`.
 `functions/` (Node 22, npm — NOT bun; it targets the Cloud Functions runtime). `cd functions && npm
 install`, `npm run build`, `firebase deploy --only functions`.
 
-It holds four things, and each had to argue for itself, because everything user-facing — share
-links included — runs on rules alone. **Notification email** needs the Admin SDK to read an address
-off the Auth account, which is what keeps email out of Firestore entirely. **The reaper** enumerates
+It exports eight functions doing four jobs, and each job had to argue for itself, because
+everything user-facing — share links included — runs on rules alone. **Notification email** (the
+four triggers, plus `unsubscribe`, the one HTTP endpoint, answering a link in a message kip sent)
+needs the Admin SDK to read an address off the Auth account, which is what keeps email out of
+Firestore entirely. **The reaper** enumerates
 and deletes Auth accounts, which rules categorically cannot do, and runs on a timer in nobody's
 request path. **The teardown** (`teardown.ts`, `onAccountDeletionRequested`) needs something rules
 can't express at all: to RETRY without the person being there. **The text check**
 (`onTextCheckRequested`) needs the Twilio credential, which a browser must never hold — see the STOP
-note under SMS. None of the four sits between a user and their data — each reacts to a write that
-already happened, or to a clock.
+note under SMS. None of them sits between a user and their data — each reacts to a write that
+already happened, to a clock, or (`unsubscribe`) to a link kip itself mailed.
 
 ## Driving the auth flows locally
 
@@ -1807,8 +1910,8 @@ bun run check:feedback              # another
 ```
 
 It signs someone in through the email door, opens the menu and asserts they are offered **Send
-feedback** and NOT the inbox, types a report and checks it reaches Firestore carrying the right uid
-and kind. Then it opens `#/feedback` WITHOUT the role and asserts an empty list — the fragment is
+feedback** and NOT the inbox, types a report and checks it reaches Firestore carrying the right uid.
+Then it opens `#/feedback` WITHOUT the role and asserts the refusal is shown — the fragment is
 guessable, so the refusal has to be demonstrated rather than reasoned about. Then it grants the
 role, signs OUT and back in — a claim rides in the token, so a reload alone reuses the cached one
 and would show nothing — and checks the inbox row appears, both reports are listed newest-first with
@@ -1908,29 +2011,37 @@ lives in `web/tests/rules.test.ts`; plain `bun test` won't run it).
 The emulator needs a **JRE** — if `java` isn't on PATH, point it at one first, e.g.
 `export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"` and prepend
 `$JAVA_HOME/bin` to PATH. The suite covers: **portals** (owner-only mint, public read-by-id,
-non-enumerable, owner-only revoke) and **grants** (claim requires a real token, can't be claimed in
+non-enumerable, owner-only revoke, owner/scope/room fixed at birth, owner name and photo pinned
+while a slot link's room copy still refreshes) and **grants** (claim requires a real token, can't be claimed in
 someone else's name, unlocks live dates, dies instantly on revoke/regenerate, a slot link exposes
-only its own dates, one visitor's grant is useless to another); **connectRequests** by both routes
-(searchable recipient, or a live link — forgery blocked, id shape, party-only read, and a pending
-one can't be refreshed once its link is revoked or rewritten to claim someone else's); **bookings**
-(dates must match an OPEN slot at ask AND confirm, dates that have gone can't be asked for at all,
-a slot holds one stay, a slot is born free, a
-link visitor can never instant-book, no client-writable mail, cancellation attribution can't be
-pinned on the other party); **guest access** (a `{bookingId}` pointer, inert once the booking isn't
+only its own dates, one visitor's grant is useless to another); **connectRequests** by all three routes
+(searchable recipient, a live link, or a shared stay — forgery blocked, id shape, party-only read, and a pending
+one can't be refreshed once its link is revoked or rewritten to claim someone else's; the photo is
+pinned, and a named link or stay must be real even to a searchable recipient); **listings** (the
+owner can't be changed); **bookings** (dates must match an OPEN slot at ask AND confirm, dates that
+have gone can't be asked for at all, a slot holds one stay, a slot is born free, a link visitor can
+never instant-book, no client-writable mail, cancellation attribution can't be pinned on the other
+party; born clean — no extra keys, not pre-hidden, not backdated; status is one of the three and
+every cancel says who and why; a share-link ask at the 10-lookup ceiling still passes); **guest access** (a `{bookingId}` pointer, inert once the booking isn't
 CONFIRMED); **slots** (a booked slot's dates are frozen, notes still editable; an expired slot's
 dates are frozen too — not even by a day — while notes and delete still work, and a slot ending
-TODAY stays editable, which pins the deliberate UTC-vs-local slack); **friend edges**
-(you may heal only the entry describing you, you may read only your own side, and an edge that
+TODAY stays editable, which pins the deliberate UTC-vs-local slack; neither party can free a
+slot and keep the stay, the host can't mark one taken by an unconfirmed ask, and status is `OPEN`
+or `BOOKED`); **friend edges** (you may heal only the entry describing you, you may read only your
+own side, nobody lands in your own list without an ask or renamed on the way in, and an edge that
 isn't there ANSWERS rather than denying — the portal's `areFriends` asks about a stranger every
 time, and a rule touching `resource.data` would refuse it and strand the connect control on
 `unknown`, which is exactly what `connectRequests` does); the **usernames registry + profile
-integrity** (including that an `email` or `phoneNumber` key is refused outright, and that every
-field a profile really has still writes); the
+integrity** (including that an `email` or `phoneNumber` key is refused outright, that every field
+a profile really has still writes, one handle per account that never changes once set, a registry
+entry refused unless the profile names it in the same commit, and no delete verb on a profile or
+its settings, even for the owner); the
 **discovery gate**; **saved searches** (owner-only, not listable, not plantable by anyone else);
 **shared stays** (a friend of the guest reads the booking, a friend of only the host reads the SLOT
 but not the booking, sharing off closes it and back on reopens it, absent prefs counts as NOT sharing,
 a request or cancellation is never shared, planting a friend edge on your own side proves nothing,
-and the feed's query is refused without its status filter); and
+and the feed's query is refused without its status filter; an ask whose dates have gone stops
+showing the host who asked); and
 the **browse lookup budget** (20 distinct friends passes, 25 fails); **leaving** (you ask for your
 own deletion and nobody else's, signed out asks for nothing, you read yours and not another's, the
 collection can't be enumerated, the phase can't be rewritten, the request can't be called off once
@@ -1958,7 +2069,7 @@ If port 8080 is already held by another project's emulator, switch both `firebas
    `firebaseConfig` in `web/utils/firebase.ts` (replacing the shipped `hafaio-kip-dev` dev
    config). A blank `appId` makes `firebaseConfigured()` false and disables sign-in — the
    unconfigured fallback — so keep a real `appId` for a working build.
-5. **Blaze plan** — required for Cloud Functions, which public share links now depend on. Set a
+5. **Blaze plan** — required for Cloud Functions (notification email, leaving, the reaper, the text check). Set a
    Cloud Billing budget alert while you're there.
 6. **Auth providers, and the one switch that must stay off.** Authentication → Sign-in method:
    enable **Email link (passwordless sign-in)** (it rides on the Email/Password provider) and
@@ -1992,12 +2103,12 @@ the additive fix (note anonymous auth bypasses blocking functions).
 ## Deployment
 
 `.github/workflows/web.yml` (manual `workflow_dispatch` or a published Release) does the whole
-release: CI gate → **Firebase** (rules + functions) → GitHub Pages (`bun export` with
+release: CI gate → **Firebase** (Firestore rules, Storage rules and functions) → GitHub Pages (`bun export` with
 `NEXT_PUBLIC_BASE_PATH=/<repo>`, uploads `web/out`).
 
 **Firebase goes first, deliberately.** The site must never publish expecting rules or triggers that
 aren't live yet; if that job fails, Pages never runs and the site stays on the last good version.
-Rules deploy every time (seconds, idempotent); functions too, since working out whether they changed
+Both rule sets deploy every time (seconds, idempotent); functions too, since working out whether they changed
 since the last release is more trouble than just deploying them.
 
 **Auth is Workload Identity Federation — no key is stored anywhere.** GitHub mints a short-lived
@@ -2048,10 +2159,15 @@ geocoded twice as one search); what leaving does to one booking (`cancellationFo
 of the teardown so the skip that makes retries safe is pinned: without it a second attempt re-writes
 a booking it already cancelled and tells the other party their stay was called off again, once per
 attempt); and a drift
-check that pins the vocabulary the two packages share but can't import across
-(`NotifyKind`, cancel reasons). That drift **fails open** — the function reads `prefs.notify[kind]`,
-and a key the web side never writes is `undefined`, which `=== false` treats as "not disabled", so a
-rename silently starts emailing people who opted out. The test makes it break CI instead.
+check that pins the vocabulary the two packages share but can't import across: the notification
+kinds, the texted subset and both channels' defaults, the two map paths, the sending number, the
+teardown phases in order, and the cancel reasons — an EXACT set match between `utils/types.ts` and
+`messages.ts`, plus a check that every reason `leaving.ts` writes is one the web side knows. It
+matches against source with comments stripped, so a string surviving only in a comment doesn't
+pass. Drift now fails CLOSED at the sender — an unknown kind reads as not wanted (see the SMS
+note) — which costs silence rather than a message to someone who opted out, but silence about a
+cancelled stay is its own bug, and a renamed cancel reason silently degrades the wording. The test
+makes either break CI instead.
 
 CI (`ci.yml`) is one job, because `bun lint` covers both packages and the service worker — it ends with
 `tsc --noEmit -p ../functions`, so breaking a trigger fails the same command you already run. It
@@ -2068,8 +2184,8 @@ Auth, the Gmail App Password secret is set, and `SITE_ORIGIN` in `functions/src/
 where Pages actually serves.
 
 **`hafaio-kip-dev` IS production**, despite the name — `.firebaserc` and the config in
-`web/utils/firebase.ts` both point at it, and it carries no seed data (the seed script's output was
-never left in it). Standing up a separate `hafaio-kip` would mean redoing the whole one-time setup:
+`web/utils/firebase.ts` both point at it, and it carries no fixture data. Standing up a separate
+`hafaio-kip` would mean redoing the whole one-time setup:
 rules, storage, functions, secrets, WIF, authorized domains.
 
 **Production has been exercised, and the triggers are the record of it.** This note used to say
@@ -2087,7 +2203,14 @@ lines it returns alongside are deploys, not invocations.
 - Geocoding is via OpenStreetMap Nominatim (`utils/geocode.ts`): the listing form takes an
   address and looks up lat/lng/geohash (free, key-less, low-volume). Swap for Google/Mapbox if
   precision/volume demands. No autocomplete yet — it's a single lookup on "Find" or at submit.
-- Friends' listings refresh on demand (`refreshBrowse`), not live.
+- Friends' listings refresh on demand (`refreshBrowse`), not live. Each fetch takes a ticket and
+  only the newest may land, so a slow one can't overwrite a newer friend set or fill in the last
+  session's places after a sign-out.
+- **Switching accounts without signing out resets every piece of session state.** A texted code or
+  credential that already belongs to another account signs INTO it with no sign-out between, so the
+  uid changes under a live session and every reset keyed on `!user` is skipped. The store resets
+  during RENDER when the uid changes, not in an effect — an effect would let that render's own
+  effects act for the new uid on the old account's trips and bookings first.
 - **A lost listener is re-attached, and giving up is said out loud.** A Firestore snapshot error is
   TERMINAL — the SDK drops that listener and never retries — so `onSnapshotError` (`utils/firebase.ts`)
   logging and returning left the screen frozen on its last snapshot, still styled as live. That is
@@ -2105,12 +2228,18 @@ lines it returns alongside are deploys, not invocations.
   four. `listenersLost` then puts a notice on every screen offering a reload — a client cannot talk a
   server out of a denial, so the honest move is to stop pretending the data is live. A loss arriving
   after `REATTACH_QUIET` (60s) is a NEW incident and refills the budget, otherwise one hiccup early
-  on would leave a long session permanently one loss away from the notice. Signing in or out clears
+  on would leave a long session permanently one loss away from the notice. **The give-up is
+  announced once per incident** (`announce`, and the `listeners-lost` debug event with it): a
+  listener attached after giving up — a new place's windows, say — can still be lost, and a loss
+  after giving up still moves `lastLoss`, so a slow bleed stays one incident. **Nothing clears the
+  notice but a reload**, which is what it offers: listeners report only their failures, and the
+  first snapshot a re-attached one delivers may come from cache, so no later re-attach proves the
+  data is live again. Signing in or out clears
   the counters **and any pending timer** — sign-out is itself a reliable way to kill every listener
   at once, and since a live timer IS the burst guard, leaving one armed would swallow the new
   session's first real loss.
 
-  **A re-attach must not reset `profileReady`.** `page.tsx` renders a full-screen splash whenever
+  **A re-attach must not reset `profileReady`** — nor `deletionReady`, which follows the same rule. `page.tsx` renders a full-screen splash whenever
   that is false, so resetting it mid-session blanks the whole app — unmounting an open sheet and any
   half-typed form — which is the exact opposite of the invisible repair this mechanism exists to be.
   Which session an opening belongs to is now `gateStep`'s job (see the store bullet) — it reopens
@@ -2122,24 +2251,6 @@ lines it returns alongside are deploys, not invocations.
   also still skips listings with `createdAt === 0`). Verified against the emulator by swapping
   deny-all rules under live listeners: a *live* listener is proved only by changing a document
   underneath it and watching the screen follow, since a frozen screen still looks populated.
-- Dev seeding: `bun run scripts/seed.ts <your-email>` (Admin SDK, ADC; needs `firebase-admin`,
-  a devDependency) builds a whole world around your account — friends with and without
-  handles/photos/places, incoming and outgoing connect requests, places of all three types, slots
-  that are open / Instant / booked / expired, bookings from both sides in every status including
-  all five cancel reasons, thirteen share links covering each scope plus a dead token, and a saved
-  search whose "new" badge is live. It ends by
-  **printing where to find each state**, which is the point: most of these surfaces are otherwise
-  unreachable without a second real account. Set `KIP_ORIGIN` if `bun dev` isn't on port 3000.
-
-  It is **idempotent by construction**: every document it writes is named `seed_…` or lives under
-  a user that is, so the wipe at the start is a documentId range scan (plus the two cases whose ids
-  the schema dictates — a `${from}_${to}` connect request, and the friend edges and saved searches
-  under your real account). Dropping an entry from the file really removes it. One side effect worth knowing: it
-  sets your own `prefs.profilePortalId`, so a profile link you'd already shared is replaced.
-
-  What it can't cover, and why: onboarding and the unverified-email banner live on the Auth
-  account, not Firestore; photo states need bytes in Storage, and seeding `photos` with URLs that
-  point at nothing would just render broken images.
 - Double-booking is closed. Confirming is a **transaction** (`confirmBooking`) that re-reads the
   slot inside the commit and aborts if anything touched it, so of two confirms racing on one slot
   exactly one wins and the other gets `"unavailable"` and an explanation. The rules also refuse the
@@ -2148,10 +2259,9 @@ lines it returns alongside are deploys, not invocations.
   Same guarantee instant booking has always had.
 - The friends'-stays feed is capped at five rows on a PersonPage and is not on Home. Where someone
   is going is a glance, not an inbox — see the design bullet on `shareStaysWithFriends`.
-- Notification email is built (`functions/src/index.ts`) but sends nothing until the Gmail secrets
-  are set and the functions deployed — see Notifications above.
 - `firebase/storage.rules` is owner-only and has no emulator suite, but it no longer needs one: it
-  makes no cross-service calls and says one thing. The visibility it used to duplicate is tested on
+  makes no cross-service calls and says two things: owner-only, and uploads capped at 5 MB of
+  `image/*`. The visibility it used to duplicate is tested on
   the Firestore side. Photos were verified end to end against the real project — upload, reorder,
   the cover following the reorder, and a share-link visitor loading one.
 - A TTL policy on `grants` (field `expires`) IS configured on `hafaio-kip-dev`
@@ -2520,7 +2630,8 @@ lines it returns alongside are deploys, not invocations.
   in that table, and returns false for a kind it does not know. Drift then costs silence, which
   someone reports, instead of a message nobody can take back. The test has three jobs — the kind
   union, the `sms: true` subset, and both tables' default values — plus a fourth worth its keep:
-  assert the literal strings `"notify"` and `"notifySms"` appear in `index.ts`, since the map PATH is
+  assert the literal strings `"notify"` and `"notifySms"` appear in `index.ts`'s code, not merely a
+  comment, since the map PATH is
   the one thing it has never pinned and the new one is the likelier to be mistyped.
 
   **It ships able to be off, and the credential is never a deploy-time condition.** One gate —

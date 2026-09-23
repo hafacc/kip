@@ -5,14 +5,27 @@ rules_version = '2';
 // request, spent whether a clause matches or not, and re-deriving the listing's
 // six-way visibility here 403'd every guest and share-link holder. Everyone else
 // follows the download URL, so the Firestore listing read is the real gate.
+//
+// Uploads are the browser's own re-encode (a JPEG at most 1600px on an edge),
+// which lands well under a megabyte; the cap bounds what a crafted client can
+// park in the bucket.
 service firebase.storage {
   match /b/{bucket}/o {
+    function isImageUpload() {
+      return request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
     match /listings/{ownerId}/{listingId}/{photoId} {
-      allow read, write: if request.auth != null && request.auth.uid == ownerId;
+      allow read, delete: if request.auth != null && request.auth.uid == ownerId;
+      allow create, update: if request.auth != null && request.auth.uid == ownerId
+        && isImageUpload();
     }
 
     match /avatars/{uid} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow read, delete: if request.auth != null && request.auth.uid == uid;
+      allow create, update: if request.auth != null && request.auth.uid == uid
+        && isImageUpload();
     }
   }
 }
