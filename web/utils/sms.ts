@@ -1,7 +1,7 @@
 // kip's sending number, empty until one is provisioned — the same "ships able to
 // be off" shape `smsConfigured()` has on the sender's side. It is not a secret:
-// it rides in the From line of every message kip sends, exactly as GMAIL_USER
-// does.
+// it rides in the From line of every message kip sends, exactly as the email
+// sender does.
 //
 // A SECOND copy of `TWILIO_FROM` in `functions/src/index.ts`, because the two
 // packages cannot import from each other. `tests/drift.test.ts` pins them
