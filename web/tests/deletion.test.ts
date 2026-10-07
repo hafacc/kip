@@ -4,7 +4,7 @@ import {
   DELETION_PHASES,
   type DeletionPhase,
   deletionProgress,
-} from "../utils/types";
+} from "../src/lib/types";
 
 // The bar is the only thing a person watching a teardown can read, and nothing
 // else it draws is checkable — the phases arrive from a trigger nobody can

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { checkoutParts, stayOpensCheckout } from "../utils/checkout";
+import { checkoutParts, stayOpensCheckout } from "../src/lib/checkout";
 
 describe("checkoutParts", () => {
   it("shows nothing when nothing is written", () => {

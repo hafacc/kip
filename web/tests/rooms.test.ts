@@ -11,8 +11,8 @@ import {
   toPortalRoom,
   toRooms,
   wholePlaceLabel,
-} from "../utils/rooms";
-import type { AvailabilityWindow, Room } from "../utils/types";
+} from "../src/lib/rooms";
+import type { AvailabilityWindow, Room } from "../src/lib/types";
 
 function room(id: string, order: number, extra: Partial<Room> = {}): Room {
   return {

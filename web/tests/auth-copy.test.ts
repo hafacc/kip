@@ -13,16 +13,21 @@ import { describe, expect, it } from "bun:test";
 // wants looking at in a browser rather than trusting to the number.
 const BUDGET = 42;
 
-// Read rather than imported: every one of these lives in a "use client" module
-// that pulls in React, the store and Firebase, and a copy-length check should
-// not need a browser to run. Scanning the source also picks up a line added
-// later, which is the half of this that a fixed list would miss.
-const PANEL = readFileSync("components/auth-panel.tsx", "utf8");
-const GATE = readFileSync("components/name-gate.tsx", "utf8");
-const PORTAL = readFileSync("app/portal/page.tsx", "utf8");
-const SETTINGS = readFileSync("components/settings-view.tsx", "utf8");
-const FIELD = readFileSync("components/reach-field.tsx", "utf8");
-const AUTH = readFileSync("utils/auth.ts", "utf8");
+// Read rather than imported: every one of these lives in a module that pulls in
+// Svelte, the store and Firebase, and a copy-length check should not need a
+// browser to run. Scanning the source also picks up a line added later, which
+// is the half of this that a fixed list would miss.
+const PANEL = readFileSync("src/lib/components/auth-panel.svelte", "utf8");
+const GATE = readFileSync("src/lib/components/name-gate.svelte", "utf8");
+// Each of these two is a form of its own inside a larger screen, so it gets a
+// file of its own for the scan to be scoped to.
+const PORTAL = readFileSync(
+  "src/routes/(app)/portal/name-form.svelte",
+  "utf8",
+);
+const DOORS = readFileSync("src/lib/components/doors-section.svelte", "utf8");
+const FIELD = readFileSync("src/lib/reach.ts", "utf8");
+const AUTH = readFileSync("src/lib/auth.ts", "utf8");
 
 function literals(source: string): string[] {
   return [...source.matchAll(/"((?:[^"\\\n]|\\.)*)"/g)]
@@ -45,36 +50,37 @@ function body(source: string, declaration: string): string {
   return lines.slice(0, end).join("\n");
 }
 
-// Everything handed to `setError`, including the literal it compares against to
+// Everything assigned to `error`, including the literal it compares against to
 // decide whether `authErrorMessage` said anything useful. Only the errors: the
 // standing captions these slots show the rest of the time are as long as their
 // own reservation allows, and it is the SWAP that has to fit.
 function errors(source: string): string[] {
-  const calls: string[] = [];
-  for (const match of source.matchAll(/setError\(/g)) {
-    let depth = 1;
+  const assigned: string[] = [];
+  for (const match of source.matchAll(/\berror =\s/g)) {
+    // To the `;` that ends the statement, skipping any inside a string.
     let end = match.index + match[0].length;
-    while (depth > 0) {
+    let quote: string | null = null;
+    while (quote !== null || source[end] !== ";") {
       const character = source[end];
-      if (character === undefined) throw new Error("unclosed setError call");
-      if (character === "(") depth += 1;
-      if (character === ")") depth -= 1;
+      if (character === undefined) throw new Error("unclosed assignment");
+      if (quote === null && (character === '"' || character === "`")) {
+        quote = character;
+      } else if (character === quote && source[end - 1] !== "\\") {
+        quote = null;
+      }
       end += 1;
     }
-    calls.push(source.slice(match.index + match[0].length, end - 1));
+    assigned.push(source.slice(match.index + match[0].length, end));
   }
-  return calls.flatMap(literals);
+  return assigned.flatMap(literals);
 }
 
 describe("every reach surface's message slot shares one copy budget", () => {
   const sources: Array<[string, () => string[]]> = [
     ["auth-panel", () => errors(PANEL)],
     ["name-gate", () => errors(GATE)],
-    // Scoped to the form, since the two files also report elsewhere: the
-    // portal's own notice sits under the sheet with room to wrap, and
-    // Settings' Notifications card is not a slot at all.
-    ["the portal's name form", () => errors(body(PORTAL, "function NameForm"))],
-    ["the doors sheets", () => errors(body(SETTINGS, "function DoorsSection"))],
+    ["the portal's name form", () => errors(PORTAL)],
+    ["the doors sheets", () => errors(DOORS)],
     ["reachError", () => literals(body(FIELD, "export function reachError"))],
     [
       "authErrorMessage",

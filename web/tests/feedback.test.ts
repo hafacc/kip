@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { EMAIL_DOOR, GOOGLE_DOOR, PHONE_DOOR } from "../utils/auth";
-import { credentialed } from "../utils/feedback";
+import { EMAIL_DOOR, GOOGLE_DOOR, PHONE_DOOR } from "../src/lib/auth";
+import { credentialed } from "../src/lib/feedback";
 
 // A copy of `hasCredential()` from firestore.rules, which the rules suite pins
 // on its own side. What this pins is the COPY: the two disagreeing shows up as

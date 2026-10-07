@@ -8,8 +8,8 @@ import {
   type SearchCriteria,
   sameCriteria,
   searchListings,
-} from "../utils/search";
-import type { AvailabilityWindow, Listing } from "../utils/types";
+} from "../src/lib/search";
+import type { AvailabilityWindow, Listing } from "../src/lib/types";
 
 const DAY = 86_400_000;
 // A clock for `createdAt`/`lastSeenAt` only, which are compared with each other

@@ -112,7 +112,7 @@ const bundle = (() => {
   const out = join(dir, "bundle.js");
   writeFileSync(
     entry,
-    `import { shrink, PhotoEncodeError } from ${JSON.stringify(join(WEB, "utils", "photos.ts"))};\n` +
+    `import { shrink, PhotoEncodeError } from ${JSON.stringify(join(WEB, "src", "lib", "photos.ts"))};\n` +
       "globalThis.__shrink = shrink;\n" +
       "globalThis.__PhotoEncodeError = PhotoEncodeError;\n",
   );

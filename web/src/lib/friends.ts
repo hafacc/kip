@@ -1,0 +1,227 @@
+import {
+  collection,
+  type DocumentData,
+  doc,
+  getDoc,
+  getDocFromCache,
+  onSnapshot,
+  type QueryDocumentSnapshot,
+  setDoc,
+  Timestamp,
+  updateDoc,
+  writeBatch,
+} from "firebase/firestore";
+import { db, onSnapshotError } from "./firebase";
+import { attempt, classifySnapshot } from "./profile-gate";
+import type { Friend, Profile } from "./types";
+import { normalizeUsername } from "./username";
+
+// A pending serverTimestamp() reads as null locally until the write lands.
+function epoch(value: unknown): number {
+  return value instanceof Timestamp ? value.toMillis() : 0;
+}
+
+function toProfile(uid: string, data: DocumentData): Profile {
+  return {
+    uid,
+    username: data.username ?? "",
+    displayName: data.displayName ?? "",
+    photoURL: data.photoURL ?? null,
+    searchable: data.searchable === true,
+    createdAt: epoch(data.createdAt),
+  };
+}
+
+// A denial surfaces as null rather than throwing, so a private stranger reads
+// as "not found" — which is what the rules intend them to look like.
+export async function fetchUserProfile(uid: string): Promise<Profile | null> {
+  const snap = await getDoc(doc(db(), "users", uid)).catch((error) => {
+    if (error?.code !== "permission-denied") throw error;
+    return null;
+  });
+  if (!snap?.exists()) return null;
+  return toProfile(uid, snap.data());
+}
+
+// Freely reversible, because the handle stays claimed either way.
+export async function setSearchable(
+  uid: string,
+  searchable: boolean,
+): Promise<void> {
+  await setDoc(doc(db(), "users", uid), { searchable }, { merge: true });
+}
+
+// The profile lives in Firestore, not on the Auth user, so own-profile views
+// read it live. Metadata events are load-bearing: confirming a cached absence
+// changes no document data, so without them the server's "really no profile"
+// would never raise.
+export function watchOwnProfile(
+  uid: string,
+  onAnswer: (profile: Profile | null) => void,
+  onSilence: (code: string) => void,
+): () => void {
+  const log = onSnapshotError("ownProfile");
+  const ref = doc(db(), "users", uid);
+  // Which snapshot a cache read belongs to. It is local and quick, but the
+  // server can still answer first, and an answer it overtook would wind the
+  // profile back to nothing under an app already rendering it. Teardown counts
+  // as being overtaken, which is the half this used to miss — see `attempt`.
+  const run = attempt();
+  const unsubscribe = onSnapshot(
+    ref,
+    { includeMetadataChanges: true },
+    (snap) => {
+      const current = run.mint();
+      if (
+        classifySnapshot(snap.exists(), snap.metadata.fromCache) === "answered"
+      ) {
+        onAnswer(snap.exists() ? toProfile(uid, snap.data()) : null);
+      } else {
+        // An absence from cache proves nothing until the cache says why it was
+        // raised. A remembered server verdict is as believable as a remembered
+        // profile — the server said there is none, and this read is what tells
+        // that from the SDK having given up with nothing to go on, which is the
+        // silence the gate exists to report.
+        void getDocFromCache(ref).then(
+          () => {
+            if (current()) onAnswer(null);
+          },
+          () => {
+            if (current()) onSilence("offline-verdict");
+          },
+        );
+      }
+    },
+    (error) => {
+      log(error);
+      onSilence(error.code);
+    },
+  );
+
+  // Both callers of `run` are guarded by it, so after this nothing from this
+  // attempt speaks again — which is what lets the store set the profile
+  // unconditionally. A second guard there would be the same contract stated
+  // twice, and the two would drift.
+  return () => {
+    run.stop();
+    unsubscribe();
+  };
+}
+
+// Your own edge, so it needs no grant — which is what makes it askable from the
+// share-link page, where the visitor can't read the host's side of anything.
+export async function areFriends(
+  uid: string,
+  otherUid: string,
+): Promise<boolean> {
+  const snap = await getDoc(doc(db(), "users", uid, "friends", otherUid));
+  return snap.exists();
+}
+
+function toFriend(snap: QueryDocumentSnapshot<DocumentData>): Friend {
+  const data = snap.data();
+  return {
+    uid: snap.id,
+    username: data.username ?? "",
+    displayName: data.displayName ?? "",
+    photoURL: data.photoURL ?? null,
+    since: epoch(data.since),
+  };
+}
+
+// Firestore refuses a batch past 500 writes.
+const BATCH_LIMIT = 500;
+
+type EdgeIdentity = {
+  displayName: string;
+  photoURL: string | null;
+  username: string;
+};
+
+// Rewrites the copy of you in every friend's list — the rule lets you rewrite
+// the entry describing YOU, which is the only way that copy is ever corrected.
+// All three fields go every time: the rule compares each against your committed
+// profile, so an edge written before you claimed a handle holds '' and a heal
+// that left `username` out would be refused along with its whole batch.
+//
+// A chunk that fails is retried edge by edge, so one missing reverse edge (an
+// unfriend landing mid-heal) costs that edge and not everyone else's.
+export async function healFriendEdges(
+  uid: string,
+  identity: EdgeIdentity,
+  friendUids: readonly string[],
+): Promise<void> {
+  for (let start = 0; start < friendUids.length; start += BATCH_LIMIT) {
+    const chunk = friendUids.slice(start, start + BATCH_LIMIT);
+    const batch = writeBatch(db());
+    for (const friendUid of chunk) {
+      batch.update(doc(db(), "users", friendUid, "friends", uid), identity);
+    }
+    try {
+      await batch.commit();
+    } catch (batchError) {
+      const results = await Promise.allSettled(
+        chunk.map((friendUid) =>
+          updateDoc(doc(db(), "users", friendUid, "friends", uid), identity),
+        ),
+      );
+      const failures = results.filter(
+        (result): result is PromiseRejectedResult =>
+          result.status === "rejected",
+      );
+      for (const failure of failures) {
+        console.error("healFriendEdges", failure.reason);
+      }
+      // Every edge refused is not a stray missing edge — it is the heal itself
+      // being wrong, and the caller should hear about it.
+      if (failures.length === chunk.length) throw batchError;
+    }
+  }
+}
+
+export async function updateProfileIdentity(
+  uid: string,
+  identity: EdgeIdentity,
+  friendUids: readonly string[],
+): Promise<void> {
+  // Before the edges, never in one batch: the edge rule compares against the
+  // COMMITTED profile, so batching checks the new name against the old. The
+  // handle is not written here — it is bound to the registry and only a claim
+  // sets it.
+  const { displayName, photoURL } = identity;
+  await setDoc(
+    doc(db(), "users", uid),
+    { displayName, photoURL },
+    { merge: true },
+  );
+  await healFriendEdges(uid, identity, friendUids);
+}
+
+export function watchFriends(
+  uid: string,
+  onChange: (friends: Friend[]) => void,
+): () => void {
+  return onSnapshot(
+    collection(db(), "users", uid, "friends"),
+    (snap) => {
+      onChange(snap.docs.map(toFriend));
+    },
+    onSnapshotError("friends"),
+  );
+}
+
+// Two gets, no query — the users table is never enumerable.
+export async function findUserByUsername(
+  username: string,
+): Promise<Profile | null> {
+  const idx = await getDoc(doc(db(), "usernames", normalizeUsername(username)));
+  if (!idx.exists()) return null;
+  return fetchUserProfile(idx.data().uid as string);
+}
+
+export async function unfriend(uid: string, friendUid: string): Promise<void> {
+  const batch = writeBatch(db());
+  batch.delete(doc(db(), "users", uid, "friends", friendUid));
+  batch.delete(doc(db(), "users", friendUid, "friends", uid));
+  await batch.commit();
+}

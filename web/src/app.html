@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- Both scripts are explained where their other half lives:
+         lib/theme.svelte.ts and lib/install.svelte.ts. -->
+    <script>
+      try {
+        const stored = localStorage.getItem("theme");
+        const dark =
+          stored === "dark" ||
+          (stored !== "light" &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.classList.add(dark ? "dark" : "light");
+        document.documentElement.style.colorScheme = dark ? "dark" : "light";
+      } catch {}
+      window.addEventListener("beforeinstallprompt", (event) => {
+        event.preventDefault();
+        window.kipInstallPrompt = event;
+      });
+    </script>
+    %sveltekit.head%
+  </head>
+  <body>
+    <div style="display: contents">%sveltekit.body%</div>
+  </body>
+</html>
