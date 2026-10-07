@@ -72,6 +72,18 @@ export type ListingPhoto = {
   readonly url: string;
 };
 
+// A named room inside a flat or house, stored in the listing's `rooms` map
+// under its id. Its dates live in the place's one `windows` subcollection,
+// which is what lets the place's link and a profile link cover them unchanged.
+export type Room = {
+  readonly id: string;
+  readonly name: string;
+  readonly note: string;
+  readonly photos: readonly ListingPhoto[];
+  readonly publicPortalId: string | null;
+  readonly order: number;
+};
+
 export type Listing = {
   readonly id: string;
   readonly ownerId: string;
@@ -80,6 +92,8 @@ export type Listing = {
   readonly description: string;
   readonly location: GeoLocation;
   readonly photos: readonly ListingPhoto[];
+  // Keyed by room id; empty for a place offered only whole. FLAT and HOUSE only.
+  readonly rooms: Readonly<Record<string, Room>>;
   readonly publicPortalId: string | null;
   readonly createdAt: number;
 };
@@ -93,12 +107,19 @@ export type AvailabilityWindow = {
   readonly status: WindowStatus;
   readonly autoAccept: boolean;
   readonly details: string;
+  // Which room these dates offer; null is the whole place. Fixed at birth.
+  readonly roomId: string | null;
   readonly bookingId: string | null; // never a uid: every friend of the HOST reads this
   readonly publicPortalId: string | null;
   // 0 for anything written before this field existed, so it reads as "not new"
   // rather than flooding a saved search that has never seen it.
   readonly createdAt: number;
 };
+
+// Which kind of link an ask came through, when the rules need telling: a room
+// link is checked on its own, since a fourth token check would not fit in the
+// lookups one write is allowed. Not a secret.
+export type BookingVia = "ROOM";
 
 // Carries no names: each side self-issues a `knownBy` pointer and reads the
 // other's profile live. Copies here would mean rewriting every booking a person
@@ -117,6 +138,7 @@ export type Booking = {
   readonly cancelReason: CancelReason | null;
   // A per-party hide, since this one document is both parties' record.
   readonly hiddenBy: readonly string[];
+  readonly via: BookingVia | null;
   readonly createdAt: number;
 };
 
@@ -298,7 +320,7 @@ export type View =
   // fragment is guessable and deliberately not a secret.
   | "feedback";
 
-export type PortalScope = "USER" | "LISTING" | "SLOT";
+export type PortalScope = "USER" | "LISTING" | "SLOT" | "ROOM";
 
 export type PortalWindow = {
   readonly id: string;
@@ -306,11 +328,32 @@ export type PortalWindow = {
   readonly end: string;
   readonly details: string;
   readonly autoAccept: boolean;
+  // Null is the whole place; otherwise an id in its listing's `rooms`.
+  readonly roomId: string | null;
   // A slot link still shows its slot when taken, so the recipient sees it went
   // rather than an empty page. Wider links drop taken dates — except the
   // visitor's own, which is what `bookedByMe` keeps.
   readonly booked: boolean;
   readonly bookedByMe: boolean;
+};
+
+// A room as a share-link visitor sees it: no token, no ordering field.
+export type PortalRoom = {
+  readonly id: string;
+  readonly name: string;
+  readonly note: string;
+  readonly photos: readonly ListingPhoto[];
+};
+
+// The copy a ROOM link carries, stored as `room` on the portal. Copied because
+// the link must not unlock the listing document, which holds every other room.
+export type PortalRoomShell = {
+  readonly name: string;
+  readonly note: string;
+  readonly photos: readonly ListingPhoto[];
+  readonly houseTitle: string;
+  readonly houseType: ListingType;
+  readonly locationLabel: string;
 };
 
 // The one thing copied rather than read live, because a rule can't search a
@@ -323,6 +366,9 @@ export type PortalListing = {
   readonly description: string;
   readonly locationLabel: string;
   readonly photos: readonly ListingPhoto[];
+  // Every room for a USER or LISTING link, in order; the one room a SLOT or
+  // ROOM link is about; empty when the dates are the whole place's.
+  readonly rooms: readonly PortalRoom[];
   readonly windowIds: readonly string[] | null;
 };
 
@@ -336,6 +382,11 @@ export type Portal = {
   readonly ownerName: string;
   readonly ownerPhotoURL: string | null;
   readonly listings: readonly PortalListing[];
+  // LISTING and ROOM scope name their place; only ROOM names a room and
+  // carries its copy.
+  readonly listingId: string | null;
+  readonly roomId: string | null;
+  readonly room: PortalRoomShell | null;
   readonly createdAt: number;
 };
 

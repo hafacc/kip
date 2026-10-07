@@ -59,26 +59,37 @@ import {
 } from "./friends";
 import { watchDeletion } from "./leave";
 import {
+  addRoom as fbAddRoom,
+  addRoomWindows as fbAddRoomWindows,
   addWindow as fbAddWindow,
   createListing as fbCreateListing,
   deleteListing as fbDeleteListing,
+  removeRoom as fbRemoveRoom,
+  reorderRooms as fbReorderRooms,
   setListingPhotos as fbSetListingPhotos,
+  setRoomPhotos as fbSetRoomPhotos,
   setWindowAutoAccept as fbSetWindowAutoAccept,
   updateListing as fbUpdateListing,
+  updateRoom as fbUpdateRoom,
   updateWindow as fbUpdateWindow,
   fetchFriendListings,
   fetchListing,
   fetchWindows,
   type ListingInput,
+  type NewRoom,
+  type RoomInput,
+  type WindowInput,
   watchMyListings,
   watchWindows,
 } from "./listings";
 import { deleteAvatar, uploadAvatar } from "./photos";
 import {
   publishListingPortal as fbPublishPortal,
+  publishRoomPortal as fbPublishRoomPortal,
   publishSlotPortal as fbPublishSlotPortal,
   publishUserPortal as fbPublishUserPortal,
   revokeListingPortal as fbRevokePortal,
+  revokeRoomPortal as fbRevokeRoomPortal,
   revokeSlotPortal as fbRevokeSlotPortal,
   revokeUserPortal as fbRevokeUserPortal,
   ownedPortalIds,
@@ -244,6 +255,7 @@ type ContextShape = {
     listingId: string,
     input: ListingInput,
     photos: readonly ListingPhoto[],
+    rooms?: readonly NewRoom[],
   ) => Promise<void>;
   updateListing: (listingId: string, input: ListingInput) => Promise<void>;
   setListingPhotos: (
@@ -251,14 +263,36 @@ type ContextShape = {
     photos: readonly ListingPhoto[],
   ) => Promise<void>;
   deleteListing: (listing: Listing) => Promise<void>;
-  addWindow: (
+  // Resolves to the new room's id. Pass `roomId` (from `newRoomId`) and
+  // `photos` when they were uploaded before the room existed.
+  addRoom: (
+    listing: Listing,
+    input: RoomInput,
+    roomId?: string,
+    photos?: readonly ListingPhoto[],
+  ) => Promise<string>;
+  updateRoom: (
     listingId: string,
-    window: {
-      start: string;
-      end: string;
-      autoAccept: boolean;
-      details: string;
-    },
+    roomId: string,
+    input: RoomInput,
+  ) => Promise<void>;
+  setRoomPhotos: (
+    listingId: string,
+    roomId: string,
+    photos: readonly ListingPhoto[],
+  ) => Promise<void>;
+  reorderRooms: (
+    listingId: string,
+    orderedRoomIds: readonly string[],
+  ) => Promise<void>;
+  // Cancels the room's future stays and asks, and deletes its dates and links.
+  removeRoom: (listing: Listing, roomId: string) => Promise<void>;
+  addWindow: (listingId: string, window: WindowInput) => Promise<void>;
+  // The same dates in each of several rooms, in one commit.
+  addRoomWindows: (
+    listingId: string,
+    roomIds: readonly string[],
+    window: Omit<WindowInput, "roomId">,
   ) => Promise<void>;
   setWindowAutoAccept: (
     listingId: string,
@@ -294,6 +328,9 @@ type ContextShape = {
     listingId: string,
     window: AvailabilityWindow,
   ) => Promise<void>;
+  // Publishing again regenerates: the room's previous link dies with it.
+  publishRoomPortal: (listing: Listing, roomId: string) => Promise<string>;
+  revokeRoomPortal: (listing: Listing, roomId: string) => Promise<void>;
   setShareStays: (share: boolean) => Promise<void>;
   setNotify: (key: NotifyKind, on: boolean) => Promise<void>;
   // One answer for every SMS kind, since one switch collects the consent they
@@ -1373,9 +1410,10 @@ export function KipProvider({ children }: { children: ReactNode }) {
       listingId: string,
       input: ListingInput,
       photos: readonly ListingPhoto[],
+      rooms: readonly NewRoom[] = [],
     ) => {
       if (!user) throw new Error("not signed in");
-      return fbCreateListing(user.uid, listingId, input, photos);
+      return fbCreateListing(user.uid, listingId, input, photos, rooms);
     },
     [user],
   );
@@ -1423,6 +1461,59 @@ export function KipProvider({ children }: { children: ReactNode }) {
       return requestBooking(profile.uid, listing, window);
     },
     [profile],
+  );
+
+  // A room edit is an edit to the place, so it reaches the same copies: the
+  // room's own link and any link on its dates.
+  const updateRoom = useCallback(
+    async (listingId: string, roomId: string, input: RoomInput) => {
+      await fbUpdateRoom(listingId, roomId, input);
+      const listing = myListings.find(
+        (candidate) => candidate.id === listingId,
+      );
+      const room = listing?.rooms[roomId];
+      if (!listing || !room) return;
+      await propagateListing(
+        {
+          ...listing,
+          rooms: { ...listing.rooms, [roomId]: { ...room, ...input } },
+        },
+        myWindows[listingId] ?? [],
+      ).catch((error) => console.error("propagateListing", error));
+    },
+    [myListings, myWindows],
+  );
+
+  const setRoomPhotos = useCallback(
+    async (
+      listingId: string,
+      roomId: string,
+      photos: readonly ListingPhoto[],
+    ) => {
+      await fbSetRoomPhotos(listingId, roomId, photos);
+      const listing = myListings.find(
+        (candidate) => candidate.id === listingId,
+      );
+      const room = listing?.rooms[roomId];
+      if (!listing || !room) return;
+      await propagateListing(
+        {
+          ...listing,
+          rooms: {
+            ...listing.rooms,
+            [roomId]: { ...room, photos: [...photos] },
+          },
+        },
+        myWindows[listingId] ?? [],
+      ).catch((error) => console.error("propagateListing", error));
+    },
+    [myListings, myWindows],
+  );
+
+  const removeRoom = useCallback(
+    (listing: Listing, roomId: string) =>
+      fbRemoveRoom(listing, roomId, incomingBookings),
+    [incomingBookings],
   );
 
   // The store holds the bookings live, so the caller needn't gather them.
@@ -1614,6 +1705,21 @@ export function KipProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const publishRoomPortal = useCallback(
+    (listing: Listing, roomId: string) => {
+      if (!profile) throw new Error("not signed in");
+      return fbPublishRoomPortal(listing, roomId, asParty());
+    },
+    [profile, asParty],
+  );
+
+  const revokeRoomPortal = useCallback((listing: Listing, roomId: string) => {
+    const portalId = listing.rooms[roomId]?.publicPortalId;
+    return portalId
+      ? fbRevokeRoomPortal(listing.id, roomId, portalId)
+      : Promise.resolve();
+  }, []);
+
   const value: ContextShape = {
     configured,
     authReady,
@@ -1677,7 +1783,13 @@ export function KipProvider({ children }: { children: ReactNode }) {
     updateListing,
     setListingPhotos,
     deleteListing,
+    addRoom: fbAddRoom,
+    updateRoom,
+    setRoomPhotos,
+    reorderRooms: fbReorderRooms,
+    removeRoom,
     addWindow: fbAddWindow,
+    addRoomWindows: fbAddRoomWindows,
     setWindowAutoAccept: fbSetWindowAutoAccept,
     updateWindow,
     cancelWindow,
@@ -1694,6 +1806,8 @@ export function KipProvider({ children }: { children: ReactNode }) {
     revokeUserPortal,
     publishSlotPortal,
     revokeSlotPortal,
+    publishRoomPortal,
+    revokeRoomPortal,
     setShareStays,
     setNotify,
     setTexts,

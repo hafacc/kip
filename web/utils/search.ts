@@ -3,6 +3,7 @@
 import { distanceBetween } from "geofire-common";
 import { formatDate, isExpired } from "./format";
 import { listingTypeLabel } from "./listings";
+import { offeredType } from "./rooms";
 import type { AvailabilityWindow, Listing, ListingType } from "./types";
 
 export type SearchCriteria = {
@@ -38,6 +39,8 @@ export type SavedSearch = {
 
 export type ListingMatch = {
   readonly listing: Listing;
+  // The dates that matched, earliest first. Each one's `roomId` says whether it
+  // is a room's or the whole place's, so a card can name the room.
   readonly windows: readonly AvailabilityWindow[];
   readonly distanceKm: number | null;
 };
@@ -65,8 +68,6 @@ export function searchListings(
 ): ListingMatch[] {
   const matches: ListingMatch[] = [];
   for (const listing of listings) {
-    if (criteria.type && listing.type !== criteria.type) continue;
-
     let distanceKm: number | null = null;
     if (criteria.near) {
       // Unplaced listings drop out rather than matching from (0, 0).
@@ -79,8 +80,11 @@ export function searchListings(
     }
 
     const windows = (windowsByListing[listing.id] ?? [])
-      .filter((window) =>
-        windowMatchesDates(window, criteria.start, criteria.end),
+      .filter(
+        (window) =>
+          // Per window, not per place: a room's dates in a house are a room.
+          (!criteria.type || offeredType(listing, window) === criteria.type) &&
+          windowMatchesDates(window, criteria.start, criteria.end),
       )
       .sort((left, right) => left.start.localeCompare(right.start));
     if (windows.length === 0) continue;

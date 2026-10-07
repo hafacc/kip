@@ -4049,3 +4049,491 @@ describe("a share-link ask at the lookup ceiling", () => {
     );
   });
 });
+
+// A house with two rooms. `back` carries a room link; `front` does not unless a
+// test gives it one. Every room's dates sit in the place's one `windows`
+// subcollection, told apart by `roomId`.
+describe("rooms in a place", () => {
+  const VISITOR = "roomvisitor";
+  const FRIEND = "roomfriend";
+  const roomPortal = {
+    scope: "ROOM",
+    ownerId: OWNER,
+    ownerName: "Owner",
+    ownerPhotoURL: null,
+    listingId: "H1",
+    roomId: "back",
+    room: {
+      name: "Back bedroom",
+      note: "",
+      photos: [],
+      houseTitle: "The house",
+      houseType: "HOUSE",
+      locationLabel: "Brooklyn, NY",
+    },
+    createdAt: 0,
+  };
+  const room = (name: string, order: number, publicPortalId: string | null) => ({
+    name,
+    note: "",
+    photos: [],
+    publicPortalId,
+    order,
+  });
+  const dates = (roomId: string | null, from: number) => ({
+    start: isoIn(from),
+    end: isoIn(from + 4),
+    status: "OPEN",
+    autoAccept: false,
+    details: "",
+    roomId,
+    bookingId: null,
+    publicPortalId: null,
+  });
+  const ask = (windowId: string, from: number) => ({
+    listingId: "H1",
+    ownerId: OWNER,
+    guestId: VISITOR,
+    windowId,
+    start: isoIn(from),
+    end: isoIn(from + 4),
+    status: "REQUESTED",
+    cancelledBy: null,
+    cancelReason: null,
+    createdAt: serverTimestamp(),
+  });
+  const grant = (db: Firestore, token: string, uid: string) =>
+    setDoc(doc(db, "portals", token, "grants", uid), { expires: new Date() });
+  const windowsOf = (db: Firestore) => collection(db, "listings", "H1", "windows");
+  const openIn = (db: Firestore, roomId: string) =>
+    query(windowsOf(db), where("roomId", "==", roomId), where("status", "==", "OPEN"));
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, "users", OWNER), { displayName: "Owner" });
+      await setDoc(doc(db, "listings", "H1"), {
+        ownerId: OWNER,
+        title: "The house",
+        type: "HOUSE",
+        publicPortalId: null,
+        rooms: {
+          back: room("Back bedroom", 0, "pr"),
+          front: room("Front bedroom", 1, null),
+        },
+      });
+      await setDoc(doc(db, "portals", "pr"), roomPortal);
+      await setDoc(doc(db, "listings", "H1", "windows", "wBack"), dates("back", 10));
+      await setDoc(doc(db, "listings", "H1", "windows", "wBack2"), dates("back", 20));
+      await setDoc(doc(db, "listings", "H1", "windows", "wFront"), dates("front", 10));
+      await setDoc(doc(db, "listings", "H1", "windows", "wWhole"), dates(null, 30));
+    });
+  });
+
+  describe("dates name a real room, for good", () => {
+    const fresh = (roomId: string | null) => ({ ...dates(roomId, 50), createdAt: serverTimestamp() });
+
+    it("the whole place, or a room the place has, can be offered", async () => {
+      const db = authed(OWNER);
+      await assertSucceeds(setDoc(doc(windowsOf(db), "n1"), fresh(null)));
+      await assertSucceeds(setDoc(doc(windowsOf(db), "n2"), fresh("front")));
+      const { roomId: _dropped, ...legacy } = fresh(null);
+      await assertSucceeds(setDoc(doc(windowsOf(db), "n3"), legacy));
+    });
+
+    it("a room the place does not have is refused", async () => {
+      await assertFails(setDoc(doc(windowsOf(authed(OWNER)), "n4"), fresh("attic")));
+    });
+
+    it("a place with no rooms can only offer itself", async () => {
+      await seed((db) => setDoc(doc(db, "listings", "plain"), { ownerId: OWNER }));
+      const plain = collection(authed(OWNER), "listings", "plain", "windows");
+      await assertFails(setDoc(doc(plain, "n5"), fresh("back")));
+      await assertSucceeds(setDoc(doc(plain, "n6"), fresh(null)));
+    });
+
+    it("the room can never change, though the notes still can", async () => {
+      const db = authed(OWNER);
+      await assertFails(updateDoc(doc(windowsOf(db), "wBack"), { roomId: "front" }));
+      await assertFails(updateDoc(doc(windowsOf(db), "wBack"), { roomId: null }));
+      await assertFails(updateDoc(doc(windowsOf(db), "wWhole"), { roomId: "back" }));
+      await assertSucceeds(updateDoc(doc(windowsOf(db), "wBack"), { details: "Fresh sheets" }));
+      await assertSucceeds(updateDoc(doc(windowsOf(db), "wWhole"), { details: "All of it" }));
+    });
+
+    // `addRoomWindows`, shape for shape.
+    it("the same dates go into several rooms in one commit", async () => {
+      const db = authed(OWNER);
+      const batch = writeBatch(db);
+      batch.set(doc(windowsOf(db)), fresh("back"));
+      batch.set(doc(windowsOf(db)), fresh("front"));
+      await assertSucceeds(batch.commit());
+    });
+  });
+
+  describe("a room link", () => {
+    // `publishRoomPortal`, shape for shape.
+    it("is minted by the owner alongside the room's token", async () => {
+      const db = authed(OWNER);
+      const batch = writeBatch(db);
+      batch.delete(doc(db, "portals", "pr"));
+      batch.set(doc(db, "portals", "pr2"), { ...roomPortal, createdAt: serverTimestamp() });
+      batch.update(doc(db, "listings", "H1"), { "rooms.back.publicPortalId": "pr2" });
+      await assertSucceeds(batch.commit());
+    });
+
+    it("cannot be minted in someone else's name", async () => {
+      await assertFails(setDoc(doc(authed("attacker"), "portals", "prx"), roomPortal));
+    });
+
+    it("keeps its place, room and scope, while its copy refreshes", async () => {
+      const mine = doc(authed(OWNER), "portals", "pr");
+      await assertFails(updateDoc(mine, { roomId: "front" }));
+      await assertFails(updateDoc(mine, { listingId: "H2" }));
+      await assertFails(updateDoc(mine, { scope: "LISTING" }));
+      await assertSucceeds(
+        updateDoc(mine, { room: { ...roomPortal.room, name: "Garden room" } }),
+      );
+      await assertFails(
+        updateDoc(doc(authed("attacker"), "portals", "pr"), {
+          room: { ...roomPortal.room, name: "Mine now" },
+        }),
+      );
+    });
+
+    it("only the owner can revoke it", async () => {
+      await assertFails(deleteDoc(doc(authed("attacker"), "portals", "pr")));
+      const db = authed(OWNER);
+      const batch = writeBatch(db);
+      batch.delete(doc(db, "portals", "pr"));
+      batch.update(doc(db, "listings", "H1"), { "rooms.back.publicPortalId": null });
+      await assertSucceeds(batch.commit());
+    });
+
+    it("shows nothing without a grant", async () => {
+      await assertFails(getDoc(doc(windowsOf(authed(VISITOR)), "wBack")));
+      await assertFails(getDocs(openIn(authed(VISITOR), "back")));
+    });
+
+    it("opens its own room's open dates, by id and by query", async () => {
+      await seed((db) => grant(db, "pr", VISITOR));
+      const db = authed(VISITOR);
+      await assertSucceeds(getDoc(doc(windowsOf(db), "wBack")));
+      await assertSucceeds(getDocs(openIn(db, "back")));
+    });
+
+    it("opens nothing else: not the other room, the whole place, or the listing", async () => {
+      await seed((db) => grant(db, "pr", VISITOR));
+      const db = authed(VISITOR);
+      await assertFails(getDoc(doc(windowsOf(db), "wFront")));
+      await assertFails(getDoc(doc(windowsOf(db), "wWhole")));
+      await assertFails(getDoc(doc(db, "listings", "H1")));
+      await assertFails(getDocs(openIn(db, "front")));
+      await assertFails(getDocs(windowsOf(db)));
+      await assertFails(getDocs(query(windowsOf(db), where("status", "==", "OPEN"))));
+      // The room's query must pin OPEN: a taken date is its holder's alone.
+      await assertFails(getDocs(query(windowsOf(db), where("roomId", "==", "back"))));
+    });
+
+    it("another room's link does not open this room", async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, "portals", "pf"), { ...roomPortal, roomId: "front" });
+        await setDoc(doc(db, "listings", "H1"), { rooms: { front: { publicPortalId: "pf" } } }, { merge: true });
+        await grant(db, "pf", VISITOR);
+      });
+      const db = authed(VISITOR);
+      await assertSucceeds(getDocs(openIn(db, "front")));
+      await assertFails(getDocs(openIn(db, "back")));
+      await assertFails(getDoc(doc(windowsOf(db), "wBack")));
+    });
+
+    it("one visitor's grant is useless to another", async () => {
+      await seed((db) => grant(db, "pr", VISITOR));
+      await assertFails(getDoc(doc(windowsOf(authed("freeloader")), "wBack")));
+      await assertFails(getDocs(openIn(authed("freeloader"), "back")));
+    });
+
+    it("revoking kills the grant instantly", async () => {
+      await seed(async (db) => {
+        await grant(db, "pr", VISITOR);
+        await setDoc(doc(db, "listings", "H1"), { rooms: { back: { publicPortalId: null } } }, { merge: true });
+      });
+      await assertFails(getDoc(doc(windowsOf(authed(VISITOR)), "wBack")));
+      await assertFails(getDocs(openIn(authed(VISITOR), "back")));
+    });
+
+    it("regenerating kills the old grant instantly", async () => {
+      await seed(async (db) => {
+        await grant(db, "pr", VISITOR);
+        await setDoc(doc(db, "portals", "pr2"), roomPortal);
+        await setDoc(doc(db, "listings", "H1"), { rooms: { back: { publicPortalId: "pr2" } } }, { merge: true });
+      });
+      await assertFails(getDoc(doc(windowsOf(authed(VISITOR)), "wBack")));
+      await assertFails(getDocs(openIn(authed(VISITOR), "back")));
+    });
+
+    it("removing the room kills it too", async () => {
+      await seed(async (db) => {
+        await grant(db, "pr", VISITOR);
+        await setDoc(doc(db, "listings", "H1"), {
+          ownerId: OWNER,
+          rooms: { front: room("Front bedroom", 1, null) },
+        });
+      });
+      await assertFails(getDoc(doc(windowsOf(authed(VISITOR)), "wBack")));
+    });
+
+    it("does not show a date someone else has taken, but shows the visitor their own", async () => {
+      await seed(async (db) => {
+        await grant(db, "pr", VISITOR);
+        await setDoc(doc(db, "bookings", "theirs"), { ...ask("wBack", 10), guestId: "other", status: "CONFIRMED", createdAt: 0 });
+        await setDoc(doc(db, "bookings", "mine"), { ...ask("wBack2", 20), status: "CONFIRMED", createdAt: 0 });
+        await setDoc(doc(db, "listings", "H1", "windows", "wBack"), { status: "BOOKED", bookingId: "theirs" }, { merge: true });
+        await setDoc(doc(db, "listings", "H1", "windows", "wBack2"), { status: "BOOKED", bookingId: "mine" }, { merge: true });
+      });
+      const db = authed(VISITOR);
+      await assertFails(getDoc(doc(windowsOf(db), "wBack")));
+      await assertSucceeds(getDoc(doc(windowsOf(db), "wBack2")));
+      await assertSucceeds(getDocs(openIn(db, "back")));
+    });
+  });
+
+  describe("the wider links still cover every room", () => {
+    it("the place's link reads every room's dates and the rooms themselves", async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, "portals", "pl"), { ...portal, listingId: "H1" });
+        await setDoc(doc(db, "listings", "H1"), { publicPortalId: "pl" }, { merge: true });
+        await grant(db, "pl", VISITOR);
+      });
+      const db = authed(VISITOR);
+      await assertSucceeds(getDoc(doc(db, "listings", "H1")));
+      await assertSucceeds(getDocs(query(windowsOf(db), where("status", "==", "OPEN"))));
+      await assertSucceeds(getDoc(doc(windowsOf(db), "wFront")));
+    });
+
+    it("a profile link reads every room's dates", async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, "portals", "pu"), { ...portal, scope: "USER" });
+        await setDoc(doc(db, "users", OWNER, "settings", "prefs"), { profilePortalId: "pu" });
+        await grant(db, "pu", VISITOR);
+      });
+      await assertSucceeds(
+        getDocs(query(windowsOf(authed(VISITOR)), where("status", "==", "OPEN"))),
+      );
+    });
+
+    it("a friend reads every room's dates", async () => {
+      await seed((db) => setDoc(doc(db, "users", OWNER, "friends", FRIEND), { since: 0 }));
+      await assertSucceeds(getDocs(windowsOf(authed(FRIEND))));
+    });
+  });
+
+  describe("asking to stay through a room link", () => {
+    beforeEach(async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, "users", VISITOR), { displayName: "Visitor" });
+        await grant(db, "pr", VISITOR);
+      });
+    });
+
+    it("goes when the ask says it came through the room's link", async () => {
+      await assertSucceeds(
+        addDoc(collection(authed(VISITOR), "bookings"), { ...ask("wBack", 10), via: "ROOM" }),
+      );
+    });
+
+    it("is refused unmarked: the other three links are not held", async () => {
+      await assertFails(addDoc(collection(authed(VISITOR), "bookings"), ask("wBack", 10)));
+    });
+
+    it("only ROOM or nothing may be written there", async () => {
+      await assertFails(
+        addDoc(collection(authed(VISITOR), "bookings"), { ...ask("wBack", 10), via: "SLOT" }),
+      );
+      await assertFails(
+        addDoc(collection(authed(VISITOR), "bookings"), { ...ask("wBack", 10), via: true }),
+      );
+    });
+
+    // The worst case: every other link that can cover this window is live too.
+    // Unmarked, a fourth token check would make 12 lookups; marked, it is 5.
+    it("still goes when the dates, the place and the profile all carry live links", async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, "portals", "pw"), { ...portal, scope: "SLOT" });
+        await setDoc(doc(db, "portals", "pl"), { ...portal, listingId: "H1" });
+        await setDoc(doc(db, "portals", "pu"), { ...portal, scope: "USER" });
+        await setDoc(doc(db, "listings", "H1"), { publicPortalId: "pl" }, { merge: true });
+        await setDoc(doc(db, "listings", "H1", "windows", "wBack"), { publicPortalId: "pw" }, { merge: true });
+        await setDoc(doc(db, "users", OWNER, "settings", "prefs"), { profilePortalId: "pu" });
+      });
+      await assertSucceeds(
+        addDoc(collection(authed(VISITOR), "bookings"), { ...ask("wBack", 10), via: "ROOM" }),
+      );
+    });
+
+    it("is refused for a room that has no link", async () => {
+      await assertFails(
+        addDoc(collection(authed(VISITOR), "bookings"), { ...ask("wFront", 10), via: "ROOM" }),
+      );
+    });
+
+    it("is refused for the whole place, whatever else the visitor holds", async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, "portals", "pl"), { ...portal, listingId: "H1" });
+        await setDoc(doc(db, "listings", "H1"), { publicPortalId: "pl" }, { merge: true });
+        await grant(db, "pl", VISITOR);
+      });
+      const db = authed(VISITOR);
+      await assertFails(addDoc(collection(db, "bookings"), { ...ask("wWhole", 30), via: "ROOM" }));
+      // The place's link does cover it, asked the ordinary way.
+      await assertSucceeds(addDoc(collection(db, "bookings"), ask("wWhole", 30)));
+    });
+
+    it("is refused on the strength of another room's link", async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, "portals", "pf"), { ...roomPortal, roomId: "front" });
+        await setDoc(doc(db, "listings", "H1"), { rooms: { front: { publicPortalId: "pf" } } }, { merge: true });
+        await grant(db, "pf", "frontvisitor");
+        await setDoc(doc(db, "users", "frontvisitor"), { displayName: "Front" });
+      });
+      await assertFails(
+        addDoc(collection(authed("frontvisitor"), "bookings"), {
+          ...ask("wBack", 10),
+          guestId: "frontvisitor",
+          via: "ROOM",
+        }),
+      );
+    });
+
+    it("is refused once the link is revoked", async () => {
+      await seed((db) =>
+        setDoc(doc(db, "listings", "H1"), { rooms: { back: { publicPortalId: null } } }, { merge: true }),
+      );
+      await assertFails(
+        addDoc(collection(authed(VISITOR), "bookings"), { ...ask("wBack", 10), via: "ROOM" }),
+      );
+    });
+
+    // A friend could self-confirm this slot; a link-holder cannot.
+    it("can never skip approval, even on an instant slot", async () => {
+      await seed((db) =>
+        setDoc(doc(db, "listings", "H1", "windows", "wBack"), { autoAccept: true }, { merge: true }),
+      );
+      const db = authed(VISITOR);
+      const batch = writeBatch(db);
+      batch.set(doc(db, "bookings", "grab"), { ...ask("wBack", 10), status: "CONFIRMED", via: "ROOM" });
+      batch.update(doc(windowsOf(db), "wBack"), { status: "BOOKED", bookingId: "grab" });
+      await assertFails(batch.commit());
+      await assertFails(
+        setDoc(doc(db, "bookings", "grab2"), { ...ask("wBack", 10), status: "CONFIRMED", via: "ROOM" }),
+      );
+    });
+
+    it("cannot be marked or unmarked afterwards", async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, "bookings", "marked"), { ...ask("wBack", 10), via: "ROOM", createdAt: 0 });
+        await setDoc(doc(db, "bookings", "plain"), { ...ask("wBack2", 20), createdAt: 0 });
+      });
+      await assertFails(updateDoc(doc(authed(OWNER), "bookings", "marked"), { via: null }));
+      await assertFails(updateDoc(doc(authed(VISITOR), "bookings", "plain"), { via: "ROOM" }));
+    });
+
+    // The host confirms it like any other ask.
+    it("is confirmed by the host like any other", async () => {
+      await seed((db) =>
+        setDoc(doc(db, "bookings", "marked"), { ...ask("wBack", 10), via: "ROOM", createdAt: 0 }),
+      );
+      const db = authed(OWNER);
+      const batch = writeBatch(db);
+      batch.update(doc(db, "bookings", "marked"), { status: "CONFIRMED" });
+      batch.update(doc(windowsOf(db), "wBack"), { status: "BOOKED", bookingId: "marked" });
+      await assertSucceeds(batch.commit());
+    });
+
+    it("leaves a friend's ask and instant booking as they were", async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, "users", OWNER, "friends", FRIEND), { since: 0 });
+        await setDoc(doc(db, "listings", "H1", "windows", "wFront"), { autoAccept: true }, { merge: true });
+      });
+      const db = authed(FRIEND);
+      await assertSucceeds(
+        addDoc(collection(db, "bookings"), { ...ask("wBack", 10), guestId: FRIEND }),
+      );
+      const batch = writeBatch(db);
+      batch.set(doc(db, "bookings", "instant"), { ...ask("wFront", 10), guestId: FRIEND, status: "CONFIRMED" });
+      batch.update(doc(windowsOf(db), "wFront"), { status: "BOOKED", bookingId: "instant" });
+      await assertSucceeds(batch.commit());
+    });
+  });
+
+  // A single-document read gets 10 lookups, and a window's read rule can make
+  // 12 checks' worth when the place, the profile, the room and the dates all
+  // carry live links. These pin every reader who arrives last in that chain.
+  describe("reading one set of dates at the lookup ceiling", () => {
+    beforeEach(async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, "portals", "pw"), { ...slotPortal });
+        await setDoc(doc(db, "portals", "pl"), { ...portal, listingId: "H1" });
+        await setDoc(doc(db, "portals", "pu"), { ...portal, scope: "USER" });
+        await setDoc(doc(db, "listings", "H1"), { publicPortalId: "pl" }, { merge: true });
+        await setDoc(doc(db, "listings", "H1", "windows", "wBack"), { publicPortalId: "pw" }, { merge: true });
+        await setDoc(doc(db, "users", OWNER, "settings", "prefs"), { profilePortalId: "pu" });
+      });
+    });
+
+    it("a date-link visitor reads an open room's dates", async () => {
+      await seed((db) => grant(db, "pw", VISITOR));
+      await assertSucceeds(getDoc(doc(windowsOf(authed(VISITOR)), "wBack")));
+    });
+
+    // A slot link shows its dates as taken rather than vanishing.
+    it("a date-link visitor reads them once someone else has taken them", async () => {
+      await seed(async (db) => {
+        await grant(db, "pw", VISITOR);
+        await setDoc(doc(db, "bookings", "theirs"), { ...ask("wBack", 10), guestId: "other", status: "CONFIRMED", createdAt: 0 });
+        await setDoc(doc(db, "listings", "H1", "windows", "wBack"), { status: "BOOKED", bookingId: "theirs" }, { merge: true });
+      });
+      await assertSucceeds(getDoc(doc(windowsOf(authed(VISITOR)), "wBack")));
+    });
+
+    // The holder check reads the booking in one lookup and errors when it is
+    // gone; the links checked after it must still be heard.
+    it("a date-link visitor still reads dates whose booking no longer exists", async () => {
+      await seed(async (db) => {
+        await grant(db, "pw", VISITOR);
+        await setDoc(doc(db, "listings", "H1", "windows", "wBack"), { status: "BOOKED", bookingId: "gone" }, { merge: true });
+      });
+      await assertSucceeds(getDoc(doc(windowsOf(authed(VISITOR)), "wBack")));
+      await assertFails(getDoc(doc(windowsOf(authed("nobody")), "wBack")));
+    });
+
+    it("the guest holding them reads them with no grant at all", async () => {
+      await seed(async (db) => {
+        await setDoc(doc(db, "bookings", "mine"), { ...ask("wBack", 10), status: "CONFIRMED", createdAt: 0 });
+        await setDoc(doc(db, "listings", "H1", "windows", "wBack"), { status: "BOOKED", bookingId: "mine" }, { merge: true });
+      });
+      await assertSucceeds(getDoc(doc(windowsOf(authed(VISITOR)), "wBack")));
+    });
+
+    it("a room-link visitor reads them, by id and by query", async () => {
+      await seed((db) => grant(db, "pr", VISITOR));
+      await assertSucceeds(getDoc(doc(windowsOf(authed(VISITOR)), "wBack")));
+      await assertSucceeds(getDocs(openIn(authed(VISITOR), "back")));
+    });
+
+    // The room's link is checked before each slot's own, so a room whose every
+    // date carries a link of its own still costs the query one shared check.
+    it("a room's query survives every one of its dates carrying its own link", async () => {
+      await seed(async (db) => {
+        await grant(db, "pr", VISITOR);
+        for (let index = 0; index < 12; index++) {
+          await setDoc(doc(db, "portals", `ps${index}`), { ...slotPortal });
+          await setDoc(doc(db, "listings", "H1", "windows", `many${index}`), {
+            ...dates("back", 100 + index * 5),
+            publicPortalId: `ps${index}`,
+          });
+        }
+      });
+      await assertSucceeds(getDocs(openIn(authed(VISITOR), "back")));
+    });
+  });
+});

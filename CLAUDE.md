@@ -19,19 +19,24 @@ connectRequests/{from_to}          { from, to, fromName, fromUsername, fromPhoto
                                      portalId?,   # set iff it came via a share link
                                      createdAt }  # "let's be friends" ONLY — asking to stay is a booking
 listings/{listingId}               { ownerId, title, type: "ROOM"|"FLAT"|"HOUSE", description,
-                                     location: { label, lat, lng, geohash }, photos[{id,url}], publicPortalId, createdAt }
+                                     location: { label, lat, lng, geohash }, photos[{id,url}], publicPortalId, createdAt,
+                                     rooms: { [roomId]: { name, note, photos[{id,url}], publicPortalId, order } } }
+                                     # rooms: FLAT/HOUSE only; absent or {} = none
 listings/{listingId}/windows/{wid} { start, end (ISO dates, end exclusive), status: "OPEN"|"BOOKED",
                                      autoAccept, details, bookingId (the stay holding it, or null), publicPortalId,
+                                     roomId (a key of the listing's rooms, or null = the whole place; fixed at birth),
                                      createdAt }  # when the SLOT was added, not its dates; 0 if written before the field
 bookings/{bookingId}               { listingId, ownerId, guestId, windowId, start, end,
                                      status: "REQUESTED"|"CONFIRMED"|"CANCELLED",
                                      cancelledBy?, cancelReason?,   # stamped by whoever cancels
+                                     via?,   # "ROOM" iff asked through a room link; picks which link the rule checks
                                      hiddenBy[], createdAt }   # NO names/photos — read live, see knownBy
 users/{uid}/knownBy/{readerUid}    { bookingId }   # reader-written POINTER; lets the two parties of a
                                      # confirmed stay read each other's profile. Re-checked live.
 listings/{listingId}/guests/{uid}  { bookingId }   # guest-written POINTER; re-checked live, inert once cancelled
-portals/{uuid}                     { scope: "USER"|"LISTING"|"SLOT", ownerId, ownerName, ownerPhotoURL,
-                                     listingId?,                      # LISTING scope
+portals/{uuid}                     { scope: "USER"|"LISTING"|"SLOT"|"ROOM", ownerId, ownerName, ownerPhotoURL,
+                                     listingId?,                      # LISTING and ROOM scope
+                                     roomId?, room: { name, note, photos, houseTitle, houseType, locationLabel }?,  # ROOM only
                                      listings: [{ listingId, title, ... windowIds }]?,  # SLOT only
                                      createdAt }   # public get-by-id; rooms+dates otherwise read live
 portals/{uuid}/grants/{uid}        { expires }   # visitor's proof they hold the token; unlocks live dates
@@ -80,7 +85,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
 - **Public share links = capability-URL portals.** Making something public mints a `portals/{uuid}`
   doc whose id IS an unguessable UUID; knowing it is the capability. World-readable BY ID only
   (`get: if true`, no `list` → not enumerable), revoke = delete, regenerate = new uuid + delete old
-  (kills every old link). Three scopes share one spine (`utils/portals.ts`): **USER** (all your
+  (kills every old link). Four scopes share one spine (`utils/portals.ts`; the fourth, **ROOM**, is described under *Rooms in a place*): **USER** (all your
   places, id in `prefs.profilePortalId`, control on your own PersonPage), **LISTING**
   (`listing.publicPortalId`, control in the RoomPage owner view's Sharing section), **SLOT**
   (`window.publicPortalId`, control in the per-slot Sheet on that same page).
@@ -602,6 +607,54 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   (tighter — one guest's second ask can't be answered with a slot promised to their first); and a
   friend's stay shows dates but only names the PLACE when
   the viewer can also read that listing, which is right — the host has a privacy interest here too.
+- **Rooms in a place: a map on the listing, a `roomId` on the slot.** A house or flat can carry
+  named rooms, each with an optional note, photos and share link; a listing of type Room cannot
+  (`RoomsNotAllowedError`). Rooms live INSIDE the listing document as a map keyed by room id, and
+  every set of dates stays in the one `windows` subcollection with a `roomId` — null for the whole
+  place. That shape is what makes the house's own link and a profile link cover every room's dates
+  with no rule change, and it keeps a room's token reachable from a window in zero extra lookups
+  (the listing is already read for its owner). Room photos share the place's Storage path.
+
+  **Each slot offers exactly one thing**, the whole place or one room, and `roomId` never changes
+  after create: an ask is for a room, and moving the slot would move the ask. Ticking several rooms
+  in the add-dates sheet writes one slot per room (`addRoomWindows`, one batch); the sheet opens
+  with every room ticked. **A room and the whole place can't be free on the same nights, and that
+  is the client's check** (`findOverlap` in `utils/rooms.ts`), for the reason every overlap is: a
+  rule can't read sibling slots, and the only calendar it protects is the owner's own. A
+  whole-place range clashes with everything; a room's clashes with that room's and the whole
+  place's; two rooms overlap freely. Double booking is unaffected, since a slot still holds one stay.
+
+  **A room link (ROOM scope) shows only its room.** Its token sits at
+  `listing.rooms[roomId].publicPortalId`. It must not unlock the listing document, which names
+  every other room, so the room's shell and the house's title, type and location label are COPIED
+  onto the portal, on the same terms as a SLOT link's shell, and `propagateListing` keeps both
+  current. The visitor reads that room's dates with a query filtered on `roomId` AND
+  `status == "OPEN"`; without either filter the query is refused. The room clause is OPEN-only
+  because a room-link visitor reads their own taken dates as the holder.
+
+  **The lookup budget shaped three things here**, all pinned in `rules.test.ts`:
+  - A share-link ask already spent the 10 lookups one write gets, and a fourth token check would
+    make 12. So a booking carries `via`, absent or the literal `'ROOM'`. Marked ROOM, the create
+    rule checks the room's link ALONE (5 lookups, whatever other links are live); otherwise it runs
+    the three older checks unchanged. `via` picks which links are checked, never whether one is,
+    and it is not secret. The portal page sets it; without it a room-link ask is refused.
+  - On a window READ the room clause checks the grant only (`roomGrant`), not the portal behind
+    it, because a slot-link visitor reaching it has room for exactly one more lookup. It rests on
+    a room's token and its portal always moving in one commit — publish, revoke, regenerate,
+    `removeRoom` and `deleteListing` all write both.
+  - The emulator counts `exists()` and `get()` on one path as TWO lookups. `holdsSlot` is the
+    read rule's one-`get` version of `slotHolder` for that reason; a missing booking makes it an
+    error rather than a no, and the clauses after it still pass. The window read clauses run
+    owner, friend, place link, profile link, holder, room link, slot link — the room link before
+    the slot link, or each slot-linked date would cost a room's query two lookups.
+
+  **Removing a room takes its dates with it** (`removeRoom`): future live bookings on them are
+  cancelled as `SLOT_CANCELLED`, then the slots, their links, the room's link and photos, and last
+  the map entry. Search treats a room's dates as type Room and whole-place dates as the listing's
+  type, so a search for rooms finds a house with a free room. A booking carries no room: surfaces
+  that name one read it off the slot (`use-stay-place.ts`), and notification bodies say "Back
+  bedroom at Erik's house" when the slot and room can still be read — never the subject, which is
+  also the text message and has no room for an uncapped name.
 - **Window status is owner-only; bookings drive it.** A guest can't write a listing's `windows`
   (rules), so requesting a booking only creates the `bookings` doc (`OPEN` stays `OPEN`). The
   owner's **confirm** flips the window to `BOOKED` and the booking to `CONFIRMED` in one batch;
@@ -2044,7 +2097,12 @@ but not the booking, sharing off closes it and back on reopens it, absent prefs 
 a request or cancellation is never shared, planting a friend edge on your own side proves nothing,
 and the feed's query is refused without its status filter; an ask whose dates have gone stops
 showing the host who asked); and
-the **browse lookup budget** (20 distinct friends passes, 25 fails); **leaving** (you ask for your
+the **browse lookup budget** (20 distinct friends passes, 25 fails); **rooms** (a slot's room must be one
+the place has and can't change; a room link is minted, revoked and regenerated like the others and
+dies instantly; it exposes only its own room's open dates and never the listing; its query is
+refused without the room or status filter; an ask marked `via: ROOM` passes with every other link
+live and is refused on a whole-place slot, a room with no link, or another room's grant; the
+house link still reads every room's dates); **leaving** (you ask for your
 own deletion and nobody else's, signed out asks for nothing, you read yours and not another's, the
 collection can't be enumerated, the phase can't be rewritten, the request can't be called off once
 made, it carries nothing but its own unforgeable timestamp, one that GAVE UP can be cleared by its

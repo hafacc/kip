@@ -14,12 +14,16 @@ export default function SlotRow({
   listing,
   window,
   stay = null,
+  thumbnail = true,
 }: {
   listing: Listing;
   window: AvailabilityWindow;
   // Passing this is what makes a taken row worth showing: it's the route to who
   // is there, and having it at all is the permission to know.
   stay?: Booking | null;
+  // Off under a room's own heading, where the place's cover would pass for the
+  // room's.
+  thumbnail?: boolean;
 }): ReactElement {
   const { trips, requestBooking, refreshWindows, navigate } = useKip();
   const [busy, setBusy] = useState(false);
@@ -73,9 +77,9 @@ export default function SlotRow({
     </span>
   );
   // Repeats down a list, but a date range with no picture reads as an abstraction.
-  const thumb = (
+  const thumb = thumbnail ? (
     <CoverPhoto photo={listing.photos[0]} className="h-10 w-10 shrink-0" />
-  );
+  ) : null;
 
   // Booked-by-you or pending: the row is a link to my booking page.
   if (myBooking && (iHoldWindow || pendingRequest)) {

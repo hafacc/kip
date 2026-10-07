@@ -36,6 +36,7 @@ function listing(id: string, extra: Partial<Listing> = {}): Listing {
     description: "",
     location: { label: "", lat: 0, lng: 0, geohash: "" },
     photos: [],
+    rooms: {},
     publicPortalId: null,
     createdAt: 0,
     ...extra,
@@ -47,6 +48,7 @@ function slot(
   from: number,
   to: number,
   createdAt: number,
+  roomId: string | null = null,
 ): AvailabilityWindow {
   return {
     id,
@@ -56,6 +58,7 @@ function slot(
     status: "OPEN",
     autoAccept: false,
     details: "",
+    roomId,
     bookingId: null,
     publicPortalId: null,
     createdAt,
@@ -207,5 +210,75 @@ describe("sameCriteria", () => {
     expect(
       sameCriteria({ ...EMPTY_CRITERIA, nearLabel: "x" }, EMPTY_CRITERIA),
     ).toBe(true);
+  });
+});
+
+// A room's dates inside a house are a room, whatever the place is.
+describe("searching by type across rooms", () => {
+  const room = (id: string, order: number) => ({
+    id,
+    name: id,
+    note: "",
+    photos: [],
+    publicPortalId: null,
+    order,
+  });
+  const house = listing("house", {
+    type: "HOUSE",
+    rooms: { back: room("back", 0), front: room("front", 1) },
+  });
+  const listings = [house, listing("single"), listing("flat", { type: "FLAT" })];
+  const windows = {
+    house: [
+      slot("whole", 30, 40, 0),
+      slot("backDates", 10, 14, NOW, "back"),
+      slot("frontDates", 12, 16, NOW - 5 * DAY, "front"),
+    ],
+    single: [slot("own", 10, 14, 0)],
+    flat: [slot("flatWhole", 10, 14, 0)],
+  };
+  const typed = (type: SearchCriteria["type"], extra: Partial<SearchCriteria> = {}) =>
+    searchListings(listings, windows, { ...EMPTY_CRITERIA, type, ...extra });
+
+  test("Room finds a house with open room dates, and says which", () => {
+    const matches = typed("ROOM");
+    expect(matches.map((match) => match.listing.id).sort()).toEqual([
+      "house",
+      "single",
+    ]);
+    const found = matches.find((match) => match.listing.id === "house");
+    expect(found?.windows.map((window) => window.roomId)).toEqual([
+      "back",
+      "front",
+    ]);
+  });
+
+  test("House finds only the house's whole-place dates", () => {
+    const matches = typed("HOUSE");
+    expect(matches.map((match) => match.listing.id)).toEqual(["house"]);
+    expect(matches[0].windows.map((window) => window.id)).toEqual(["whole"]);
+  });
+
+  test("a house whose rooms are free but not in range is not a room", () => {
+    const matches = typed("ROOM", { start: isoIn(31), end: isoIn(35) });
+    expect(matches).toEqual([]);
+    expect(typed("HOUSE", { start: isoIn(31), end: isoIn(35) })).toHaveLength(1);
+  });
+
+  test("a house with only whole-place dates is not a room", () => {
+    const matches = searchListings(
+      [house],
+      { house: [slot("whole", 30, 40, 0)] },
+      { ...EMPTY_CRITERIA, type: "ROOM" },
+    );
+    expect(matches).toEqual([]);
+  });
+
+  test("with no type, every open date matches and new ones are counted per slot", () => {
+    const matches = searchListings([house], windows, EMPTY_CRITERIA);
+    expect(matches[0].windows).toHaveLength(3);
+    expect(countNewSince(matches, NOW - DAY)).toBe(1);
+    expect(countNewSince(typed("ROOM"), NOW - 10 * DAY)).toBe(2);
+    expect(countNewSince(typed("HOUSE"), NOW - 10 * DAY)).toBe(0);
   });
 });
