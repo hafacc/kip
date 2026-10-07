@@ -4537,3 +4537,257 @@ describe("rooms in a place", () => {
     });
   });
 });
+
+// These can hold a door code, so every route that merely shows someone the
+// place has to be shut out one by one.
+describe("check-out instructions", () => {
+  const FRIEND = "friend-of-host";
+  const ASKER = "pending-asker";
+  const GUEST_A = "guest-of-attic";
+  const GUEST_B = "guest-of-back";
+  const GUEST_WHOLE = "guest-of-house";
+  const VISITOR = "link-visitor";
+
+  function checkout(db: Firestore, key: string) {
+    return doc(db, "listings", "HC", "checkout", key);
+  }
+
+  function stay(guestId: string, windowId: string, status: string) {
+    return {
+      listingId: "HC",
+      ownerId: OWNER,
+      guestId,
+      windowId,
+      start: isoIn(10),
+      end: isoIn(14),
+      status,
+      cancelledBy: null,
+      cancelReason: null,
+      hiddenBy: [],
+      createdAt: 0,
+    };
+  }
+
+  async function confirmedStay(
+    db: Firestore,
+    guestId: string,
+    windowId: string,
+    roomId: string | null,
+  ): Promise<void> {
+    const bookingId = `stay-${guestId}`;
+    await setDoc(doc(db, "listings", "HC", "windows", windowId), {
+      start: isoIn(10),
+      end: isoIn(14),
+      status: "BOOKED",
+      bookingId,
+      roomId,
+    });
+    await setDoc(doc(db, "bookings", bookingId), stay(guestId, windowId, "CONFIRMED"));
+    await setDoc(doc(db, "listings", "HC", "guests", guestId), { bookingId });
+  }
+
+  beforeEach(async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, "listings", "HC"), {
+        ownerId: OWNER,
+        title: "House",
+        type: "HOUSE",
+        publicPortalId: "pc",
+        rooms: {
+          attic: { name: "Attic", order: 0 },
+          back: { name: "Back", order: 1 },
+        },
+      });
+      await setDoc(checkout(db, "place"), { text: "Bins out on Sunday." });
+      await setDoc(checkout(db, "attic"), { text: "Door code 1234." });
+      await setDoc(checkout(db, "back"), { text: "Key under the mat." });
+      await setDoc(doc(db, "users", OWNER, "friends", FRIEND), { since: 0 });
+      await setDoc(doc(db, "users", FRIEND, "friends", OWNER), { since: 0 });
+      await confirmedStay(db, GUEST_A, "wAttic", "attic");
+      await confirmedStay(db, GUEST_B, "wBack", "back");
+      await confirmedStay(db, GUEST_WHOLE, "wWhole", null);
+    });
+  });
+
+  it("the owner writes, reads, lists and deletes them", async () => {
+    const db = authed(OWNER);
+    await assertSucceeds(setDoc(checkout(db, "place"), { text: "Strip the bed." }));
+    await assertSucceeds(setDoc(checkout(db, "garden"), { text: "Lock the gate." }));
+    await assertSucceeds(getDoc(checkout(db, "attic")));
+    await assertSucceeds(getDocs(collection(db, "listings", "HC", "checkout")));
+    await assertSucceeds(deleteDoc(checkout(db, "attic")));
+  });
+
+  it("nobody else writes or deletes them", async () => {
+    for (const uid of [FRIEND, GUEST_A, STRANGER]) {
+      await assertFails(setDoc(checkout(authed(uid), "place"), { text: "Mine now." }));
+      await assertFails(deleteDoc(checkout(authed(uid), "attic")));
+    }
+  });
+
+  it("a new place carries them in the commit that creates it", async () => {
+    const db = credentialed(OWNER);
+    const batch = writeBatch(db);
+    batch.set(doc(db, "listings", "HNEW"), { ownerId: OWNER, title: "New" });
+    batch.set(doc(db, "listings", "HNEW", "checkout", "place"), { text: "Hi." });
+    await assertSucceeds(batch.commit());
+  });
+
+  it("they can't ride in with a place created in someone else's name", async () => {
+    const db = credentialed(STRANGER);
+    const batch = writeBatch(db);
+    batch.set(doc(db, "listings", "HFAKE"), { ownerId: OWNER, title: "New" });
+    batch.set(doc(db, "listings", "HFAKE", "checkout", "place"), { text: "Hi." });
+    await assertFails(batch.commit());
+  });
+
+  it("the key set and the length cap hold", async () => {
+    const db = authed(OWNER);
+    await assertFails(setDoc(checkout(db, "place"), { text: "Hi.", extra: 1 }));
+    await assertFails(setDoc(checkout(db, "place"), { text: 7 }));
+    await assertFails(setDoc(checkout(db, "place"), { text: "" }));
+    await assertFails(setDoc(checkout(db, "place"), { text: "x".repeat(2001) }));
+    await assertSucceeds(setDoc(checkout(db, "place"), { text: "x".repeat(2000) }));
+  });
+
+  it("a friend of the host reads the place and none of them", async () => {
+    const db = authed(FRIEND);
+    await assertSucceeds(getDoc(doc(db, "listings", "HC")));
+    await assertFails(getDoc(checkout(db, "place")));
+    await assertFails(getDoc(checkout(db, "attic")));
+    await assertFails(getDocs(collection(db, "listings", "HC", "checkout")));
+  });
+
+  it("someone who has only asked reads none of them", async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, "listings", "HC", "windows", "wOpen"), {
+        start: isoIn(20),
+        end: isoIn(24),
+        status: "OPEN",
+        bookingId: null,
+        roomId: "attic",
+      });
+      await setDoc(doc(db, "bookings", "ask"), {
+        ...stay(ASKER, "wOpen", "REQUESTED"),
+        start: isoIn(20),
+        end: isoIn(24),
+      });
+      // Planted directly: the pointer's own rule would refuse it.
+      await setDoc(doc(db, "listings", "HC", "guests", ASKER), { bookingId: "ask" });
+    });
+    await assertFails(getDoc(checkout(authed(ASKER), "place")));
+    await assertFails(getDoc(checkout(authed(ASKER), "attic")));
+  });
+
+  it("a confirmed guest reads the place's", async () => {
+    for (const uid of [GUEST_A, GUEST_B, GUEST_WHOLE]) {
+      await assertSucceeds(getDoc(checkout(authed(uid), "place")));
+    }
+  });
+
+  it("a guest in one room reads that room's and not another's", async () => {
+    await assertSucceeds(getDoc(checkout(authed(GUEST_A), "attic")));
+    await assertFails(getDoc(checkout(authed(GUEST_A), "back")));
+    await assertSucceeds(getDoc(checkout(authed(GUEST_B), "back")));
+    await assertFails(getDoc(checkout(authed(GUEST_B), "attic")));
+  });
+
+  // A guest allowed to read a key learns it is empty rather than being refused,
+  // which is what lets the client tell "none written" from "not yours".
+  it("a room with none written answers its own guest", async () => {
+    await seed((db) => deleteDoc(checkout(db, "attic")));
+    await assertSucceeds(getDoc(checkout(authed(GUEST_A), "attic")));
+  });
+
+  it("a guest with the whole place reads no room's", async () => {
+    await assertFails(getDoc(checkout(authed(GUEST_WHOLE), "attic")));
+    await assertFails(getDoc(checkout(authed(GUEST_WHOLE), "back")));
+  });
+
+  it("no guest can list them", async () => {
+    await assertFails(
+      getDocs(collection(authed(GUEST_A), "listings", "HC", "checkout")),
+    );
+  });
+
+  it("a guest with no pointer reads none, and claiming one opens them", async () => {
+    await seed((db) => deleteDoc(doc(db, "listings", "HC", "guests", GUEST_A)));
+    const db = authed(GUEST_A);
+    await assertFails(getDoc(checkout(db, "place")));
+    await assertFails(getDoc(checkout(db, "attic")));
+    await assertSucceeds(
+      setDoc(doc(db, "listings", "HC", "guests", GUEST_A), {
+        bookingId: `stay-${GUEST_A}`,
+      }),
+    );
+    await assertSucceeds(getDoc(checkout(db, "place")));
+    await assertSucceeds(getDoc(checkout(db, "attic")));
+  });
+
+  it("access dies when the stay is cancelled", async () => {
+    await seed((db) =>
+      setDoc(doc(db, "bookings", `stay-${GUEST_A}`), {
+        ...stay(GUEST_A, "wAttic", "CANCELLED"),
+      }),
+    );
+    await assertFails(getDoc(checkout(authed(GUEST_A), "place")));
+    await assertFails(getDoc(checkout(authed(GUEST_A), "attic")));
+  });
+
+  describe("after check-out", () => {
+    async function endStay(daysAgo: number): Promise<void> {
+      const dates = { start: isoIn(-daysAgo - 4), end: isoIn(-daysAgo) };
+      await seed(async (db) => {
+        await setDoc(doc(db, "bookings", `stay-${GUEST_A}`), {
+          ...stay(GUEST_A, "wAttic", "CONFIRMED"),
+          ...dates,
+        });
+        await updateDoc(doc(db, "listings", "HC", "windows", "wAttic"), dates);
+      });
+    }
+
+    it("a guest still reads both 59 days on", async () => {
+      await endStay(59);
+      await assertSucceeds(getDoc(checkout(authed(GUEST_A), "place")));
+      await assertSucceeds(getDoc(checkout(authed(GUEST_A), "attic")));
+    });
+
+    it("a guest is refused both 61 days on", async () => {
+      await endStay(61);
+      await assertFails(getDoc(checkout(authed(GUEST_A), "place")));
+      await assertFails(getDoc(checkout(authed(GUEST_A), "attic")));
+    });
+
+    it("the owner still reads them", async () => {
+      await endStay(61);
+      await assertSucceeds(getDoc(checkout(authed(OWNER), "place")));
+      await assertSucceeds(getDoc(checkout(authed(OWNER), "attic")));
+    });
+
+    it("the guest still reads the place itself", async () => {
+      await endStay(61);
+      await assertSucceeds(getDoc(doc(authed(GUEST_A), "listings", "HC")));
+    });
+  });
+
+  it("a share-link visitor holding a grant reads none of them", async () => {
+    await seed(async (db) => {
+      await setDoc(doc(db, "portals", "pc"), { ...portal, listingId: "HC" });
+      await setDoc(doc(db, "portals", "pc", "grants", VISITOR), {
+        expires: Timestamp.fromMillis(Date.now() + 86_400_000),
+      });
+    });
+    const db = authed(VISITOR);
+    await assertSucceeds(getDoc(doc(db, "listings", "HC")));
+    await assertFails(getDoc(checkout(db, "place")));
+    await assertFails(getDoc(checkout(db, "attic")));
+  });
+
+  it("a share-link guest reads them once their stay is confirmed", async () => {
+    await seed((db) => confirmedStay(db, VISITOR, "wLink", "attic"));
+    const db = authed(VISITOR);
+    await assertSucceeds(getDoc(checkout(db, "place")));
+    await assertSucceeds(getDoc(checkout(db, "attic")));
+    await assertFails(getDoc(checkout(db, "back")));
+  });
+});

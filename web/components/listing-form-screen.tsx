@@ -1,6 +1,7 @@
 "use client";
 
 import { type ReactElement, useEffect, useRef, useState } from "react";
+import { PLACE_KEY } from "../utils/checkout";
 import {
   type ListingInput,
   type NewRoom,
@@ -22,9 +23,11 @@ export default function ListingFormScreen({
   const {
     user,
     myListings,
+    myCheckout,
     createListing,
     updateListing,
     setListingPhotos,
+    setCheckout,
     replace,
     back,
   } = useKip();
@@ -69,12 +72,28 @@ export default function ListingFormScreen({
     return <p className="text-muted">This place isn't available right now.</p>;
   }
 
-  async function submit(input: ListingInput): Promise<void> {
+  // A place being created has none stored; an existing one's arrive live.
+  const storedCheckout = id ? myCheckout[id]?.[PLACE_KEY] : "";
+  const checkoutKnown = !id || myCheckout[id] !== undefined;
+
+  async function submit(
+    input: ListingInput,
+    checkout: string | null,
+  ): Promise<void> {
     if (id) {
       await updateListing(id, input);
+      if (checkout !== null && checkout !== (storedCheckout ?? "")) {
+        await setCheckout(id, PLACE_KEY, checkout);
+      }
       back();
     } else {
-      await createListing(draftId, input, draftPhotos, draftRooms);
+      await createListing(
+        draftId,
+        input,
+        draftPhotos,
+        draftRooms,
+        checkout ?? "",
+      );
       created.current = true;
       replace({ kind: "room", id: draftId });
     }
@@ -86,6 +105,7 @@ export default function ListingFormScreen({
       ownerId={user.uid}
       listingId={initial?.id ?? draftId}
       photos={initial?.photos ?? draftPhotos}
+      checkout={checkoutKnown ? (storedCheckout ?? "") : undefined}
       draftRooms={draftRooms}
       onDraftRoom={(room) =>
         setDraftRooms((current) =>

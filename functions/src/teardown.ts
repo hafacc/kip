@@ -163,12 +163,14 @@ async function removePlaces(uid: string): Promise<void> {
   for (const listing of listings.docs) {
     // Deleting a document does not delete what hangs off it, and after this
     // nobody can reach these paths at all.
-    const [windows, guests] = await Promise.all([
+    const [windows, guests, checkout] = await Promise.all([
       listing.ref.collection("windows").get(),
       listing.ref.collection("guests").get(),
+      listing.ref.collection("checkout").get(),
     ]);
     refs.push(...windows.docs.map((entry) => entry.ref));
     refs.push(...guests.docs.map((entry) => entry.ref));
+    refs.push(...checkout.docs.map((entry) => entry.ref));
     refs.push(listing.ref);
   }
   await deleteAll(refs);
