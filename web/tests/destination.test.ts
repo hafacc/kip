@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { isForeignNumber, parseDestination } from "../utils/destination";
+import { isForeignNumber, parseDestination } from "../src/lib/destination";
 
 describe("parseDestination", () => {
   it("reads an address", () => {

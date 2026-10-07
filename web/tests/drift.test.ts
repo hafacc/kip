@@ -4,13 +4,13 @@ import {
   NOTIFY_DEFAULTS,
   NOTIFY_SMS_DEFAULTS,
 } from "../../functions/src/messages";
-import { SMS_FROM } from "../utils/sms";
+import { SMS_FROM } from "../src/lib/sms";
 import {
   DEFAULT_NOTIFY,
   DEFAULT_NOTIFY_SMS,
   DELETION_PHASES,
   NOTIFY_EVENTS,
-} from "../utils/types";
+} from "../src/lib/types";
 
 // `functions/` is a separate package on a different runtime, so it can't import
 // from `web/` — it keeps its own copy of the vocabulary they share, and nothing
@@ -31,7 +31,7 @@ const FUNCTIONS_SOURCE = code("../functions/src/messages.ts");
 const TRIGGERS_SOURCE = code("../functions/src/index.ts");
 const TEARDOWN_SOURCE = code("../functions/src/teardown.ts");
 const LEAVING_SOURCE = code("../functions/src/leaving.ts");
-const WEB_TYPES_SOURCE = code("utils/types.ts");
+const WEB_TYPES_SOURCE = code("src/lib/types.ts");
 
 function arrayMembers(source: string, name: string): string[] {
   const declaration = source.split(`const ${name} = [`)[1];

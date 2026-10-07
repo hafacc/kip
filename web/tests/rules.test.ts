@@ -3076,7 +3076,7 @@ describe("shared stays", () => {
 });
 
 // The rules above are checked with hand-built writes. These mirror what
-// `utils/` ACTUALLY sends, shape for shape, because the two can drift and the
+// `src/lib/` ACTUALLY sends, shape for shape, because the two can drift and the
 // stays feed already proved a query can be refused for what it omits rather
 // than for what it asks — a failure no rule test of the document would catch.
 describe("the calls the client really makes", () => {

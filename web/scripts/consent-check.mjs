@@ -28,7 +28,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 // gate is the behaviour while it stands, and a check that quietly passes over a
 // disabled feature is how the gate would get removed by accident.
 const SMS_LIVE = /SMS_FROM\s*=\s*"([^"]*)"/.exec(
-  await readFile(new URL("../utils/sms.ts", import.meta.url), "utf8"),
+  await readFile(new URL("../src/lib/sms.ts", import.meta.url), "utf8"),
 )?.[1];
 
 const APP = "http://localhost:3001";
@@ -183,7 +183,7 @@ async function browser() {
   await send("Runtime.enable");
   return {
     thrown,
-    // A REAL paste. `setValue` below dispatches a synthetic React input event,
+    // A REAL paste. `setValue` below dispatches a synthetic input event,
     // which is not the path a paste takes — and the path a paste takes is the
     // one `maxLength` used to truncate.
     paste: async (text) => {

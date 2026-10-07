@@ -29,7 +29,7 @@ import {
   wantsEmail,
   wantsSms,
 } from "../../functions/src/messages";
-import { NOTIFY_EVENTS } from "../utils/types";
+import { NOTIFY_EVENTS } from "../src/lib/types";
 
 // The triggers need emulators, Auth accounts and SMTP, so in practice they never
 // get exercised. The decisions they make need none of that.
