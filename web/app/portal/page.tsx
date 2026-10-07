@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 import { FaGoogle } from "react-icons/fa";
-import { LuMapPin } from "react-icons/lu";
+import { LuBed, LuMapPin } from "react-icons/lu";
 import Avatar from "../../components/avatar";
 import { PhotoGallery } from "../../components/cover-photo";
 import ReachField, {
@@ -19,6 +19,7 @@ import ReachField, {
   reachError,
   sendReach,
 } from "../../components/reach-field";
+import { groupByOffer, OfferHeading } from "../../components/rooms";
 import SiteFooter from "../../components/site-footer";
 import ThemeButton from "../../components/theme-button";
 import Busy from "../../components/ui/busy";
@@ -40,7 +41,11 @@ import {
 import { auth, errorCode } from "../../utils/firebase";
 import { formatDateRange, nights } from "../../utils/format";
 import { areFriends } from "../../utils/friends";
-import { listingTypeIcon, listingTypeLabel } from "../../utils/listings";
+import {
+  listingTypeIcon,
+  listingTypeLabel,
+  placeTypeLabel,
+} from "../../utils/listings";
 import { claimGrant, fetchPortalPage } from "../../utils/portals";
 import {
   fetchMyConnectRequest,
@@ -317,7 +322,14 @@ export default function PortalPage(): ReactElement {
       // Asking for dates IS a booking — the same document a friend creates.
       .then(() =>
         listingId && slot
-          ? requestStayViaPortal(sender.uid, portal.ownerId, listingId, slot)
+          ? requestStayViaPortal(
+              sender.uid,
+              portal.ownerId,
+              listingId,
+              slot,
+              // The rules check a room link on its own, and only when told.
+              portal.scope === "ROOM" ? "ROOM" : null,
+            )
           : sendPortalConnectRequest(portal, sender),
       )
       // Never confirmed: a link is not friendship, whatever the slot allows.
@@ -773,6 +785,7 @@ function PortalView({
           <ListingBlock
             key={listing.listingId}
             listing={listing}
+            roomLink={portal.scope === "ROOM"}
             windows={windows[listing.listingId] ?? []}
             canAsk={!isOwner}
             requestedWindowIds={standing?.windowIds ?? []}
@@ -843,6 +856,7 @@ function PortalView({
 
 function ListingBlock({
   listing,
+  roomLink,
   windows,
   canAsk,
   requestedWindowIds,
@@ -850,75 +864,112 @@ function ListingBlock({
   onAsk,
 }: {
   listing: PortalListing;
+  // A link to one room: the card is that room, and the place is only where it is.
+  roomLink: boolean;
   windows: readonly PortalWindow[];
   canAsk: boolean;
   requestedWindowIds: readonly string[];
   busy: string | null;
   onAsk: (listingId: string | null, window: PortalWindow | null) => void;
 }): ReactElement {
-  const TypeIcon = listingTypeIcon(listing.type);
+  const only = roomLink ? (listing.rooms[0] ?? null) : null;
+  const TypeIcon = only ? LuBed : listingTypeIcon(listing.type);
+  const note = only ? only.note : listing.description;
+  // Under a room link every date is that room's, so there is nothing to group.
+  const groups =
+    !only && listing.rooms.length > 0
+      ? groupByOffer(listing.rooms, windows)
+      : null;
+
+  const dates = (shown: readonly PortalWindow[]): ReactElement => (
+    <ul className="flex flex-col divide-y divide-border border-t border-border">
+      {shown.map((window) => (
+        <li key={window.id} className="flex items-center gap-3 py-3">
+          <div className="min-w-0 flex-1">
+            <span className="block text-[0.9375rem] font-semibold">
+              {formatDateRange(window.start, window.end)}
+            </span>
+            <p className="text-sm text-muted">
+              {nights(window.start, window.end)} nights
+              {window.details ? ` · ${window.details}` : ""}
+            </p>
+          </div>
+          {/* A range the visitor holds is listed only because it's theirs, so a
+              stranger's grey chip would tell them nothing. */}
+          {window.bookedByMe ? (
+            <Chip tone="confirmed">Booked by you</Chip>
+          ) : window.booked ? (
+            <Chip tone="booked">Booked</Chip>
+          ) : requestedWindowIds.includes(window.id) ? (
+            <Chip tone="pending">Requested</Chip>
+          ) : canAsk ? (
+            <Button
+              onClick={() => onAsk(listing.listingId, window)}
+              disabled={busy !== null}
+            >
+              {busy === window.id ? <Busy label="Request" /> : "Request"}
+            </Button>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  );
+
   return (
     <div className="flex flex-col gap-3 rounded-3xl bg-surface p-4 shadow-card">
       {/* The token in each URL is what opens the object, so a link-holder
           browses the same photos a friend would. */}
-      <PhotoGallery photos={listing.photos} heroClassName="h-44 w-full" />
+      <PhotoGallery
+        photos={only ? only.photos : listing.photos}
+        heroClassName="h-44 w-full"
+      />
       <div className="flex items-start gap-3">
         <span className="bg-accent-soft grid h-10 w-10 shrink-0 place-items-center rounded-2xl text-accent-ink">
           <TypeIcon size={18} />
         </span>
         <div className="min-w-0 flex-1">
-          <h2 className="font-bold tracking-[-0.01em]">{listing.title}</h2>
+          <h2 className="font-bold tracking-[-0.01em]">
+            {only ? only.name : listing.title}
+          </h2>
           <p className="flex items-center gap-1 text-sm text-muted">
             <LuMapPin className="shrink-0" size={14} />
-            <span className="truncate">{listing.locationLabel}</span>
+            <span className="truncate">
+              {only ? `In ${listing.title} · ` : ""}
+              {listing.locationLabel}
+            </span>
           </p>
         </div>
         <Chip tone="type" className="mt-0.5">
-          {listingTypeLabel(listing.type)}
+          {only
+            ? listingTypeLabel("ROOM")
+            : // A slot link carries only the room its dates are in, so a count
+              // off it would say "1 room" of a house that has three.
+              placeTypeLabel(
+                listing.type,
+                listing.windowIds ? 0 : listing.rooms.length,
+              )}
         </Chip>
       </div>
-      {listing.description ? (
-        <p className="text-[0.9375rem] leading-relaxed text-text/90">
-          {listing.description}
-        </p>
+      {note ? (
+        <p className="text-[0.9375rem] leading-relaxed text-text/90">{note}</p>
       ) : null}
 
-      {windows.length === 0 ? (
+      {windows.length === 0 || groups?.length === 0 ? (
         <p className="border-t border-border pt-3 text-sm text-muted">
           No open dates right now.
         </p>
+      ) : groups ? (
+        groups.map((group) => (
+          <div
+            key={group.room?.id ?? "whole"}
+            className="flex flex-col gap-2 pt-1"
+          >
+            <OfferHeading type={listing.type} room={group.room} />
+            {dates(group.windows)}
+          </div>
+        ))
       ) : (
-        <ul className="flex flex-col divide-y divide-border border-t border-border">
-          {windows.map((window) => (
-            <li key={window.id} className="flex items-center gap-3 py-3">
-              <div className="min-w-0 flex-1">
-                <span className="block text-[0.9375rem] font-semibold">
-                  {formatDateRange(window.start, window.end)}
-                </span>
-                <p className="text-sm text-muted">
-                  {nights(window.start, window.end)} nights
-                  {window.details ? ` · ${window.details}` : ""}
-                </p>
-              </div>
-              {/* A range the visitor holds is listed only because it's theirs, so a
-                  stranger's grey chip would tell them nothing. */}
-              {window.bookedByMe ? (
-                <Chip tone="confirmed">Booked by you</Chip>
-              ) : window.booked ? (
-                <Chip tone="booked">Booked</Chip>
-              ) : requestedWindowIds.includes(window.id) ? (
-                <Chip tone="pending">Requested</Chip>
-              ) : canAsk ? (
-                <Button
-                  onClick={() => onAsk(listing.listingId, window)}
-                  disabled={busy !== null}
-                >
-                  {busy === window.id ? <Busy label="Request" /> : "Request"}
-                </Button>
-              ) : null}
-            </li>
-          ))}
-        </ul>
+        dates(windows)
       )}
     </div>
   );

@@ -4,14 +4,34 @@ import { type ReactElement, useEffect, useMemo, useState } from "react";
 import { LuChevronRight, LuMapPin, LuPlus, LuZap } from "react-icons/lu";
 import { fetchBookingIfVisible } from "../utils/bookings";
 import { formatDateRange, isExpired, nights, todayIso } from "../utils/format";
-import { fetchRoom, findOverlap, listingTypeLabel } from "../utils/listings";
+import { fetchRoom, placeTypeLabel } from "../utils/listings";
+import {
+  canHaveRooms,
+  findOverlap,
+  offerLabel,
+  roomList,
+  roomOf,
+  toPortalRoom,
+  wholePlaceLabel,
+} from "../utils/rooms";
 import { useKip } from "../utils/store";
 import type { AvailabilityWindow, Booking, Listing } from "../utils/types";
+import AddDatesSheet, { DATE_FIELD } from "./add-dates-sheet";
 import Avatar from "./avatar";
 import BookingRow from "./booking-row";
 import CoverPhoto, { PhotoGallery } from "./cover-photo";
 import { useAction, useDialog, useFailure } from "./dialog";
 import PhotoStrip from "./photo-strip";
+import { RoomSheet } from "./room-sheet";
+import {
+  clashNote,
+  groupByOffer,
+  hasRooms,
+  Offer,
+  OfferHeading,
+  RoomRow,
+  sortForHost,
+} from "./rooms";
 import ShareLink from "./share-link";
 import SlotRow from "./slot-row";
 import Button from "./ui/button";
@@ -20,9 +40,6 @@ import FieldNote from "./ui/field-note";
 import { Group, Row, Section } from "./ui/list";
 import Sheet from "./ui/sheet";
 import Switch from "./ui/switch";
-
-const FIELD =
-  "h-11 w-full rounded-xl border border-border bg-surface px-3.5 text-base outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20";
 
 // The single place surface: owner console, or the bookable friend view.
 export default function RoomPage({ id }: { id: string }): ReactElement {
@@ -103,7 +120,9 @@ function DetailBlock({
         {listing.title}
       </h2>
       <div className="flex flex-wrap items-center gap-2 text-sm text-muted">
-        <Chip tone="type">{listingTypeLabel(listing.type)}</Chip>
+        <Chip tone="type">
+          {placeTypeLabel(listing.type, roomList(listing).length)}
+        </Chip>
         <span className="flex min-w-0 items-center gap-1.5">
           <LuMapPin size={14} className="shrink-0" />
           <span className="truncate">{listing.location.label}</span>
@@ -201,6 +220,11 @@ function FriendView({
     )
     .sort((left, right) => left.start.localeCompare(right.start));
   const anyHeld = dates.some((window) => window.status !== "OPEN");
+  const groups = hasRooms(listing)
+    ? groupByOffer(roomList(listing).map(toPortalRoom), dates)
+    : null;
+  const stayOn = (window: AvailabilityWindow): Booking | null =>
+    window.bookingId ? (held.get(window.bookingId) ?? null) : null;
 
   return (
     <div className="flex flex-col gap-6 md:grid md:grid-cols-[minmax(0,1fr)_360px] md:items-start md:gap-8">
@@ -234,8 +258,32 @@ function FriendView({
         {/* Named for what's in it: "Open dates" would be a lie the moment a
             taken one is listed alongside. */}
         <Section title={anyHeld ? "Dates" : "Open dates"}>
-          {dates.length === 0 ? (
+          {dates.length === 0 || groups?.length === 0 ? (
             <p className="px-1 text-sm text-muted">No open dates right now.</p>
+          ) : groups ? (
+            <div className="flex flex-col gap-5">
+              {groups.map((group) => (
+                <div
+                  key={group.room?.id ?? "whole"}
+                  className="flex flex-col gap-2"
+                >
+                  <OfferHeading type={listing.type} room={group.room} />
+                  <Group>
+                    {group.windows.map((window) => (
+                      <SlotRow
+                        key={window.id}
+                        listing={listing}
+                        window={window}
+                        stay={stayOn(window)}
+                        // The house's picture beside a room's dates would
+                        // pass for the room; its own cover is in the heading.
+                        thumbnail={group.room === null}
+                      />
+                    ))}
+                  </Group>
+                </div>
+              ))}
+            </div>
           ) : (
             <Group>
               {dates.map((window) => (
@@ -243,11 +291,7 @@ function FriendView({
                   key={window.id}
                   listing={listing}
                   window={window}
-                  stay={
-                    window.bookingId
-                      ? (held.get(window.bookingId) ?? null)
-                      : null
-                  }
+                  stay={stayOn(window)}
                 />
               ))}
             </Group>
@@ -282,6 +326,11 @@ function OwnerView({ listing }: { listing: Listing }): ReactElement {
     focusedWindowId,
   );
   const [addingSlot, setAddingSlot] = useState(false);
+  // `roomId` null is the sheet that adds one.
+  const [openRoom, setOpenRoom] = useState<{ roomId: string | null } | null>(
+    null,
+  );
+  const rooms = roomList(listing);
 
   // Only ever OPENS — closing clears the argument, so the two never fight over
   // a sheet the user just dismissed.
@@ -306,16 +355,17 @@ function OwnerView({ listing }: { listing: Listing }): ReactElement {
     replace({ kind: "room", id: listing.id, windowId });
   }
 
-  const allWindows = [...(myWindows[listing.id] ?? [])].sort((left, right) =>
-    left.start.localeCompare(right.start),
-  );
+  // Two rooms offering the same nights sit together, in the Rooms list's order.
+  const allWindows = sortForHost(listing, myWindows[listing.id] ?? []);
   // The same boundary Trips uses, so a slot and a stay stop being current on the
   // same day.
   const windows = allWindows.filter((window) => !isExpired(window.end));
   // Newest first, so recent dates aren't buried under last year's.
-  const expired = allWindows
-    .filter((window) => isExpired(window.end))
-    .sort((left, right) => right.start.localeCompare(left.start));
+  const expired = sortForHost(
+    listing,
+    allWindows.filter((window) => isExpired(window.end)),
+    "latest",
+  );
   const bookings = incomingBookings
     .filter((booking) => booking.listingId === listing.id)
     .sort((left, right) => {
@@ -378,6 +428,41 @@ function OwnerView({ listing }: { listing: Listing }): ReactElement {
 
       <div className="flex flex-col gap-6 md:grid md:grid-cols-[minmax(0,1fr)_360px] md:items-start md:gap-8">
         <aside className="flex flex-col gap-6 md:col-start-2 md:row-start-1 md:sticky md:top-24">
+          {canHaveRooms(listing.type) ? (
+            <Section
+              title="Rooms"
+              action={
+                <button
+                  type="button"
+                  onClick={() => setOpenRoom({ roomId: null })}
+                  className="text-sm font-semibold text-accent-ink hover:opacity-80"
+                >
+                  Add a room
+                </button>
+              }
+            >
+              {rooms.length === 0 ? (
+                <p className="px-1 text-sm text-muted">
+                  Rooms are optional. Add them if friends can stay in one
+                  without taking the{" "}
+                  {wholePlaceLabel(listing.type).toLowerCase()}.
+                </p>
+              ) : (
+                <Group>
+                  {rooms.map((room) => (
+                    <RoomRow
+                      key={room.id}
+                      name={room.name}
+                      note={room.note}
+                      photos={room.photos}
+                      onOpen={() => setOpenRoom({ roomId: room.id })}
+                    />
+                  ))}
+                </Group>
+              )}
+            </Section>
+          ) : null}
+
           <Section title="Availability">
             {windows.length === 0 ? (
               <p className="px-1 text-sm text-muted">
@@ -388,6 +473,7 @@ function OwnerView({ listing }: { listing: Listing }): ReactElement {
                 {windows.map((window) => (
                   <SlotSummaryRow
                     key={window.id}
+                    listing={listing}
                     window={window}
                     asked={askedOn(window.id)}
                     onOpen={() => openSlotSheet(window.id)}
@@ -409,6 +495,7 @@ function OwnerView({ listing }: { listing: Listing }): ReactElement {
                 {expired.map((window) => (
                   <PastSlotRow
                     key={window.id}
+                    listing={listing}
                     window={window}
                     asked={askedOn(window.id)}
                     onOpen={() => openSlotSheet(window.id)}
@@ -506,26 +593,56 @@ function OwnerView({ listing }: { listing: Listing }): ReactElement {
         />
       ) : null}
       {addingSlot ? (
-        <AddSlotSheet
-          listingId={listing.id}
+        <AddDatesSheet
+          listing={listing}
           existing={allWindows}
           onClose={() => setAddingSlot(false)}
+        />
+      ) : null}
+      {openRoom ? (
+        <RoomSheet
+          // Keyed so moving from one room to another starts its fields afresh.
+          key={openRoom.roomId ?? "new"}
+          listing={listing}
+          roomId={openRoom.roomId}
+          onClose={() => setOpenRoom(null)}
         />
       ) : null}
     </div>
   );
 }
 
+// Says what a set of dates offers, on a place that has rooms to tell apart.
+function offerOf(
+  listing: Listing,
+  window: AvailabilityWindow,
+): ReactElement | null {
+  return hasRooms(listing) ? (
+    <Offer
+      type={listing.type}
+      room={roomOf(listing, window.roomId) !== null}
+      label={offerLabel(listing, window.roomId)}
+    />
+  ) : null;
+}
+
 function SlotSummaryRow({
+  listing,
   window,
   asked,
   onOpen,
 }: {
+  listing: Listing;
   window: AvailabilityWindow;
   asked: number;
   onOpen: () => void;
 }): ReactElement {
-  const chips = window.status === "BOOKED" || window.autoAccept || asked > 0;
+  const offer = offerOf(listing, window);
+  const chips =
+    offer !== null ||
+    window.status === "BOOKED" ||
+    window.autoAccept ||
+    asked > 0;
   return (
     <Row onClick={onOpen} ariaLabel={formatDateRange(window.start, window.end)}>
       <div className="min-w-0 flex-1">
@@ -538,6 +655,7 @@ function SlotSummaryRow({
         </span>
         {chips ? (
           <span className="mt-1 flex flex-wrap items-center gap-2">
+            {offer}
             {window.status === "BOOKED" ? (
               <Chip tone="booked">Booked</Chip>
             ) : window.autoAccept ? (
@@ -567,10 +685,12 @@ function SlotSummaryRow({
 }
 
 function PastSlotRow({
+  listing,
   window,
   asked,
   onOpen,
 }: {
+  listing: Listing;
   window: AvailabilityWindow;
   asked: number;
   onOpen: () => void;
@@ -582,6 +702,7 @@ function PastSlotRow({
           {formatDateRange(window.start, window.end)}
         </span>
         <span className="mt-0.5 flex flex-wrap items-center gap-2">
+          {offerOf(listing, window)}
           <span className="text-sm text-muted">
             {window.status === "BOOKED"
               ? "Someone stayed"
@@ -657,8 +778,9 @@ function SlotSheet({
     start !== window.start || end !== window.end || details !== window.details;
   const clash =
     start && end && end > start
-      ? findOverlap(existing, { start, end }, window.id)
+      ? findOverlap(existing, { start, end, roomId: window.roomId }, window.id)
       : null;
+  const room = roomOf(listing, window.roomId);
   const gone = Boolean(end) && isExpired(end);
   const valid = Boolean(start && end && end > start) && !clash && !gone;
 
@@ -762,9 +884,23 @@ function SlotSheet({
         {/* The place these dates belong to, so a slot opened from a link or a
             deep URL isn't just a pair of dates with no context. */}
         <CoverPhoto
-          photo={listing.photos[0]}
+          // A room's dates show the room or nothing: the house's picture over
+          // them would pass for the room.
+          photo={room ? room.photos[0] : listing.photos[0]}
           className="aspect-[16/9] max-h-44 w-full"
         />
+        {/* Plain text, not a control: which room a set of dates offers is fixed
+            once it exists, since every ask on it is an ask for that room. */}
+        {hasRooms(listing) ? (
+          <div className="flex flex-col gap-1.5">
+            <span className="text-sm text-muted">What's free</span>
+            <Offer
+              type={listing.type}
+              room={room !== null}
+              label={offerLabel(listing, window.roomId)}
+            />
+          </div>
+        ) : null}
 
         {expired ? (
           <>
@@ -830,7 +966,7 @@ function SlotSheet({
                 From
                 <input
                   type="date"
-                  className={FIELD}
+                  className={DATE_FIELD}
                   min={todayIso()}
                   value={start}
                   onChange={(event) => setStart(event.target.value)}
@@ -840,7 +976,7 @@ function SlotSheet({
                 To
                 <input
                   type="date"
-                  className={FIELD}
+                  className={DATE_FIELD}
                   min={start || todayIso()}
                   value={end}
                   onChange={(event) => setEnd(event.target.value)}
@@ -850,7 +986,7 @@ function SlotSheet({
             <label className="flex flex-col gap-1.5 text-sm text-muted">
               Notes for these dates
               <input
-                className={FIELD}
+                className={DATE_FIELD}
                 placeholder="e.g. flexible check-in, I'll be away"
                 value={details}
                 onChange={(event) => setDetails(event.target.value)}
@@ -858,7 +994,7 @@ function SlotSheet({
             </label>
             {clash ? (
               <FieldNote tone="danger">
-                Overlaps your {formatDateRange(clash.start, clash.end)} dates.
+                {clashNote(listing, window.roomId, clash)}
               </FieldNote>
             ) : gone ? (
               <FieldNote tone="danger">
@@ -898,100 +1034,6 @@ function SlotSheet({
 
         <Button variant="danger" onClick={cancelSlot}>
           {expired ? "Remove dates" : "Cancel slot"}
-        </Button>
-      </div>
-    </Sheet>
-  );
-}
-
-function AddSlotSheet({
-  listingId,
-  existing,
-  onClose,
-}: {
-  listingId: string;
-  existing: readonly AvailabilityWindow[];
-  onClose: () => void;
-}): ReactElement {
-  const { addWindow } = useKip();
-  const run = useAction();
-  const [start, setStart] = useState("");
-  const [end, setEnd] = useState("");
-  const [details, setDetails] = useState("");
-  const [autoAccept, setAutoAccept] = useState(false);
-  const clash =
-    start && end && end > start ? findOverlap(existing, { start, end }) : null;
-  // `min` on the pickers is a hint a typed date walks straight past, and a slot
-  // that's expired the moment it exists is availability nobody can ever book.
-  const gone = Boolean(end) && isExpired(end);
-  const valid = Boolean(start && end && end > start) && !clash && !gone;
-
-  function add(): void {
-    if (!valid) return;
-    run(async () => {
-      await addWindow(listingId, {
-        start,
-        end,
-        autoAccept,
-        details: details.trim(),
-      });
-      onClose();
-    });
-  }
-
-  const note = clash ? (
-    <FieldNote tone="danger">
-      Overlaps your {formatDateRange(clash.start, clash.end)} dates.
-    </FieldNote>
-  ) : gone ? (
-    <FieldNote tone="danger">Those dates have already passed.</FieldNote>
-  ) : null;
-
-  return (
-    <Sheet open onClose={onClose} title="Add dates">
-      <div className="flex flex-col gap-5">
-        <div className="grid grid-cols-2 gap-3">
-          <label className="flex flex-col gap-1.5 text-sm text-muted">
-            From
-            <input
-              type="date"
-              className={FIELD}
-              min={todayIso()}
-              value={start}
-              onChange={(event) => setStart(event.target.value)}
-            />
-          </label>
-          <label className="flex flex-col gap-1.5 text-sm text-muted">
-            To
-            <input
-              type="date"
-              className={FIELD}
-              min={start || todayIso()}
-              value={end}
-              onChange={(event) => setEnd(event.target.value)}
-            />
-          </label>
-        </div>
-        <label className="flex flex-col gap-1.5 text-sm text-muted">
-          Notes for these dates
-          <input
-            className={FIELD}
-            placeholder="e.g. flexible check-in, I'll be away"
-            value={details}
-            onChange={(event) => setDetails(event.target.value)}
-          />
-        </label>
-        <div className="rounded-2xl bg-surface-muted">
-          <Switch
-            checked={autoAccept}
-            onChange={setAutoAccept}
-            label="Instant book"
-            description="Friends book these dates instantly (first come, first served)."
-          />
-        </div>
-        {note}
-        <Button size="lg" onClick={add} disabled={!valid}>
-          Add dates
         </Button>
       </div>
     </Sheet>

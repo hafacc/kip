@@ -4,12 +4,14 @@ import {
   addDoc,
   collection,
   type DocumentData,
+  deleteField,
   doc,
   getDoc,
   getDocs,
   onSnapshot,
   type QueryDocumentSnapshot,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   Timestamp,
@@ -23,6 +25,8 @@ import type { IconType } from "react-icons";
 import { LuBed, LuBuilding2, LuHouse } from "react-icons/lu";
 import { db, onSnapshotError } from "./firebase";
 import { isExpired } from "./format";
+import { deleteListingPhoto } from "./photos";
+import { canHaveRooms, nextRoomOrder, toRooms } from "./rooms";
 import type {
   AvailabilityWindow,
   Booking,
@@ -32,6 +36,8 @@ import type {
   ListingType,
 } from "./types";
 
+export { findOverlap, toRooms } from "./rooms";
+
 export function listingTypeLabel(type: ListingType): string {
   switch (type) {
     case "ROOM":
@@ -40,6 +46,16 @@ export function listingTypeLabel(type: ListingType): string {
       return "Flat";
     case "HOUSE":
       return "House";
+  }
+}
+
+/** A place's type for a chip, with its room count when it has any: "House · 3 rooms". */
+export function placeTypeLabel(type: ListingType, roomCount: number): string {
+  const label = listingTypeLabel(type);
+  if (roomCount === 0 || !canHaveRooms(type)) {
+    return label;
+  } else {
+    return `${label} · ${roomCount} ${roomCount === 1 ? "room" : "rooms"}`;
   }
 }
 
@@ -75,6 +91,7 @@ function toListing(snap: QueryDocumentSnapshot<DocumentData>): Listing {
     description: data.description ?? "",
     location: data.location as GeoLocation,
     photos: (data.photos as ListingPhoto[]) ?? [],
+    rooms: toRooms(data.rooms),
     publicPortalId: data.publicPortalId ?? null,
     createdAt: epoch(data.createdAt),
   };
@@ -93,28 +110,11 @@ function toWindow(
     status: data.status ?? "OPEN",
     autoAccept: data.autoAccept ?? false,
     details: data.details ?? "",
+    roomId: data.roomId ?? null,
     bookingId: data.bookingId ?? null,
     publicPortalId: data.publicPortalId ?? null,
     createdAt: epoch(data.createdAt),
   };
-}
-
-// Client-side because a rule can't query sibling documents, and the only person
-// a clash hurts is the owner whose calendar it is. `end` is exclusive, so ranges
-// that merely touch are deliberately allowed.
-export function findOverlap(
-  windows: readonly AvailabilityWindow[],
-  range: { start: string; end: string },
-  skipId?: string,
-): AvailabilityWindow | null {
-  return (
-    windows.find(
-      (window) =>
-        window.id !== skipId &&
-        range.start < window.end &&
-        window.start < range.end,
-    ) ?? null
-  );
 }
 
 export type ListingInput = {
@@ -150,12 +150,25 @@ export function newListingId(): string {
   return doc(collection(db(), "listings")).id;
 }
 
+/** A room drawn up before its place exists, with an id from {@link newRoomId}. */
+export type NewRoom = {
+  readonly id: string;
+  readonly name: string;
+  readonly note: string;
+  readonly photos: readonly ListingPhoto[];
+};
+
+/** Create a place, with any rooms drawn up alongside it, in the order given. */
 export async function createListing(
   ownerId: string,
   listingId: string,
   input: ListingInput,
   photos: readonly ListingPhoto[],
+  rooms: readonly NewRoom[] = [],
 ): Promise<void> {
+  if (rooms.length > 0 && !canHaveRooms(input.type)) {
+    throw new RoomsNotAllowedError();
+  }
   await setDoc(doc(db(), "listings", listingId), {
     ownerId,
     title: input.title,
@@ -163,20 +176,63 @@ export async function createListing(
     description: input.description,
     location: withGeohash(input.location),
     photos: [...photos],
+    ...(rooms.length > 0
+      ? {
+          rooms: Object.fromEntries(
+            rooms.map((room, order) => [
+              room.id,
+              {
+                name: room.name,
+                note: room.note,
+                photos: [...room.photos],
+                publicPortalId: null,
+                order,
+              },
+            ]),
+          ),
+        }
+      : {}),
     createdAt: serverTimestamp(),
   });
 }
 
+/** Thrown when a place that is itself a room would hold rooms. */
+export class RoomsNotAllowedError extends Error {
+  constructor() {
+    super("a place of type ROOM cannot have rooms");
+    this.name = "RoomsNotAllowedError";
+  }
+}
+
+/**
+ * Save a place's details.
+ *
+ * Throws {@link RoomsNotAllowedError} when the type would become ROOM while
+ * the place still has rooms; remove them first with {@link removeRoom}.
+ */
 export async function updateListing(
   listingId: string,
   input: ListingInput,
 ): Promise<void> {
-  await updateDoc(doc(db(), "listings", listingId), {
+  const ref = doc(db(), "listings", listingId);
+  const fields = {
     title: input.title,
     type: input.type,
     description: input.description,
     location: withGeohash(input.location),
-  });
+  };
+  if (canHaveRooms(input.type)) {
+    await updateDoc(ref, fields);
+  } else {
+    // Read in the same commit, so a room added from another tab can't slip in.
+    await runTransaction(db(), async (tx) => {
+      const snap = await tx.get(ref);
+      if (Object.keys(toRooms(snap.data()?.rooms)).length > 0) {
+        throw new RoomsNotAllowedError();
+      }
+      tx.update(ref, fields);
+    });
+  }
 }
 
 // Its own write, not part of the details form: a strip edit has to land even if
@@ -239,13 +295,160 @@ export async function deleteListing(
   if (listingPortalId) {
     writes.push((batch) => batch.delete(doc(db(), "portals", listingPortalId)));
   }
+  for (const room of Object.values(listing.rooms)) {
+    const roomPortalId = room.publicPortalId;
+    if (roomPortalId) {
+      writes.push((batch) => batch.delete(doc(db(), "portals", roomPortalId)));
+    }
+  }
   writes.push((batch) => batch.delete(doc(db(), "listings", listing.id)));
+  await commitInOrder(writes);
+}
 
+async function commitInOrder(
+  writes: readonly ((batch: WriteBatch) => void)[],
+): Promise<void> {
   for (let start = 0; start < writes.length; start += BATCH_LIMIT) {
     const batch = writeBatch(db());
     for (const write of writes.slice(start, start + BATCH_LIMIT)) write(batch);
     await batch.commit();
   }
+}
+
+export type RoomInput = {
+  readonly name: string;
+  readonly note: string;
+};
+
+/** Mint a room id with no round trip, so photos can upload before the room exists. */
+export function newRoomId(): string {
+  return doc(collection(db(), "listings")).id;
+}
+
+/**
+ * Add a named room to a flat or house, last in order, and return its id.
+ *
+ * Throws {@link RoomsNotAllowedError} for a place of type ROOM.
+ */
+export async function addRoom(
+  listing: Listing,
+  input: RoomInput,
+  roomId: string = newRoomId(),
+  photos: readonly ListingPhoto[] = [],
+): Promise<string> {
+  if (!canHaveRooms(listing.type)) throw new RoomsNotAllowedError();
+  await updateDoc(doc(db(), "listings", listing.id), {
+    [`rooms.${roomId}`]: {
+      name: input.name,
+      note: input.note,
+      photos: [...photos],
+      publicPortalId: null,
+      order: nextRoomOrder(listing.rooms),
+    },
+  });
+  return roomId;
+}
+
+/** Rename a room or change its note. */
+export async function updateRoom(
+  listingId: string,
+  roomId: string,
+  input: RoomInput,
+): Promise<void> {
+  await updateDoc(doc(db(), "listings", listingId), {
+    [`rooms.${roomId}.name`]: input.name,
+    [`rooms.${roomId}.note`]: input.note,
+  });
+}
+
+/** Set a room's photos; the first is its cover. */
+export async function setRoomPhotos(
+  listingId: string,
+  roomId: string,
+  photos: readonly ListingPhoto[],
+): Promise<void> {
+  await updateDoc(doc(db(), "listings", listingId), {
+    [`rooms.${roomId}.photos`]: [...photos],
+  });
+}
+
+/** Put a place's rooms in the given order; ids left out keep their place after them. */
+export async function reorderRooms(
+  listingId: string,
+  orderedRoomIds: readonly string[],
+): Promise<void> {
+  if (orderedRoomIds.length === 0) return;
+  await updateDoc(
+    doc(db(), "listings", listingId),
+    Object.fromEntries(
+      orderedRoomIds.map((roomId, index) => [`rooms.${roomId}.order`, index]),
+    ),
+  );
+}
+
+/**
+ * Remove a room and everything that hangs off it.
+ *
+ * Cancels every future live booking on the room's dates (stamped as the owner
+ * calling the dates off), deletes those dates and their links, the room's own
+ * link and its photos, then the room. One batch while it fits; past 500 writes
+ * it goes in that order, the room last, and a retry re-derives everything.
+ * `bookings` is the owner's incoming bookings.
+ */
+export async function removeRoom(
+  listing: Listing,
+  roomId: string,
+  bookings: readonly Booking[],
+): Promise<void> {
+  const windows = await getDocs(
+    query(
+      collection(db(), "listings", listing.id, "windows"),
+      where("roomId", "==", roomId),
+    ),
+  );
+  const windowIds = new Set(windows.docs.map((window) => window.id));
+  const writes: ((batch: WriteBatch) => void)[] = [];
+  for (const booking of bookings) {
+    if (
+      booking.listingId === listing.id &&
+      windowIds.has(booking.windowId) &&
+      booking.status !== "CANCELLED" &&
+      !isExpired(booking.end)
+    ) {
+      writes.push((batch) =>
+        batch.update(doc(db(), "bookings", booking.id), {
+          status: "CANCELLED",
+          cancelledBy: booking.ownerId,
+          cancelReason: "SLOT_CANCELLED",
+        }),
+      );
+    }
+  }
+  for (const window of windows.docs) {
+    const slotPortalId = window.data().publicPortalId as string | null;
+    if (slotPortalId) {
+      writes.push((batch) => batch.delete(doc(db(), "portals", slotPortalId)));
+    }
+    writes.push((batch) => batch.delete(window.ref));
+  }
+  const room = listing.rooms[roomId];
+  const roomPortalId = room?.publicPortalId ?? null;
+  if (roomPortalId) {
+    writes.push((batch) => batch.delete(doc(db(), "portals", roomPortalId)));
+  }
+  writes.push((batch) =>
+    batch.update(doc(db(), "listings", listing.id), {
+      [`rooms.${roomId}`]: deleteField(),
+    }),
+  );
+  await commitInOrder(writes);
+
+  // After the commit: an object nothing names any more is the harmless leftover.
+  await Promise.all(
+    (room?.photos ?? []).map((photo) =>
+      deleteListingPhoto(listing.ownerId, listing.id, photo.id),
+    ),
+  );
 }
 
 export function watchWindows(
@@ -260,24 +463,52 @@ export function watchWindows(
   );
 }
 
-export async function addWindow(
-  listingId: string,
-  window: {
-    start: string;
-    end: string;
-    autoAccept: boolean;
-    details: string;
-  },
-): Promise<void> {
-  await addDoc(collection(db(), "listings", listingId, "windows"), {
+export type WindowInput = {
+  readonly start: string;
+  readonly end: string;
+  readonly autoAccept: boolean;
+  readonly details: string;
+  // Null or absent offers the whole place.
+  readonly roomId?: string | null;
+};
+
+function newWindowFields(window: WindowInput, roomId: string | null) {
+  return {
     start: window.start,
     end: window.end,
     status: "OPEN",
     autoAccept: window.autoAccept,
     details: window.details,
+    roomId,
     // What makes a saved search able to say "2 new" without asking a server.
     createdAt: serverTimestamp(),
-  });
+  };
+}
+
+/** Offer one set of dates: a room's when `roomId` is set, else the whole place's. */
+export async function addWindow(
+  listingId: string,
+  window: WindowInput,
+): Promise<void> {
+  await addDoc(
+    collection(db(), "listings", listingId, "windows"),
+    newWindowFields(window, window.roomId ?? null),
+  );
+}
+
+/** Offer the same dates in each of several rooms, in one commit. */
+export async function addRoomWindows(
+  listingId: string,
+  roomIds: readonly string[],
+  window: Omit<WindowInput, "roomId">,
+): Promise<void> {
+  if (roomIds.length === 0) return;
+  const windowsRef = collection(db(), "listings", listingId, "windows");
+  const batch = writeBatch(db());
+  for (const roomId of roomIds) {
+    batch.set(doc(windowsRef), newWindowFields(window, roomId));
+  }
+  await batch.commit();
 }
 
 export async function setWindowAutoAccept(
@@ -355,6 +586,24 @@ export async function fetchListing(listingId: string): Promise<Listing | null> {
   });
   if (!snap?.exists()) return null;
   return toListing(snap as QueryDocumentSnapshot<DocumentData>);
+}
+
+/** One set of dates by id; null when it is gone or the reader may not see it. */
+export async function fetchWindow(
+  listingId: string,
+  windowId: string,
+): Promise<AvailabilityWindow | null> {
+  const snap = await getDoc(
+    doc(db(), "listings", listingId, "windows", windowId),
+  ).catch((error) => {
+    if (error?.code !== "permission-denied") throw error;
+    return null;
+  });
+  if (!snap?.exists()) {
+    return null;
+  } else {
+    return toWindow(listingId, snap as QueryDocumentSnapshot<DocumentData>);
+  }
 }
 
 export async function fetchWindows(

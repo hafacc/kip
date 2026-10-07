@@ -7,6 +7,7 @@ import type {
   AvailabilityWindow,
   ConnectRequest,
   Listing,
+  Room,
 } from "../utils/types";
 import Avatar from "./avatar";
 import { useAction, useDialog, useFailure } from "./dialog";
@@ -19,6 +20,7 @@ import Chip from "./ui/chip";
 type LinkTarget =
   | { readonly scope: "USER" }
   | { readonly scope: "LISTING"; readonly listing: Listing }
+  | { readonly scope: "ROOM"; readonly listing: Listing; readonly room: Room }
   | {
       readonly scope: "SLOT";
       readonly listing: Listing;
@@ -36,6 +38,10 @@ function findLink(
   const room = listings.find((listing) => listing.publicPortalId === portalId);
   if (room) return { scope: "LISTING", listing: room };
   for (const listing of listings) {
+    const inside = Object.values(listing.rooms).find(
+      (candidate) => candidate.publicPortalId === portalId,
+    );
+    if (inside) return { scope: "ROOM", listing, room: inside };
     const window = (windowsByListing[listing.id] ?? []).find(
       (candidate) => candidate.publicPortalId === portalId,
     );
@@ -65,6 +71,7 @@ export default function RequestCard({
     revokeUserPortal,
     revokeListingPortal,
     revokeSlotPortal,
+    revokeRoomPortal,
   } = useKip();
   const { confirm } = useDialog();
   const { runNamed } = useNameGate();
@@ -101,7 +108,8 @@ export default function RequestCard({
   function openLink(target: LinkTarget): void {
     if (target.scope === "USER") {
       navigate({ kind: "person", id: request.to });
-    } else if (target.scope === "LISTING") {
+    } else if (target.scope === "LISTING" || target.scope === "ROOM") {
+      // A room's link is on its sheet, one tap in from the place's Rooms list.
       navigate({ kind: "room", id: target.listing.id });
     } else {
       navigate({
@@ -116,6 +124,8 @@ export default function RequestCard({
     if (target.scope === "USER") return revokeUserPortal();
     else if (target.scope === "LISTING")
       return revokeListingPortal(target.listing);
+    else if (target.scope === "ROOM")
+      return revokeRoomPortal(target.listing, target.room.id);
     else return revokeSlotPortal(target.listing.id, target.window);
   }
 
@@ -136,6 +146,13 @@ export default function RequestCard({
       return {
         title: `Turn off the link to ${target.listing.title}?`,
         body: `Everyone you've sent that room's link to loses it, along with every date you open there. ${closing}`,
+        confirmLabel: "Turn off",
+        tone: "danger" as const,
+      };
+    } else if (target.scope === "ROOM") {
+      return {
+        title: `Turn off the link to ${target.room.name}?`,
+        body: `Just ${target.room.name} at ${target.listing.title}: everyone you've sent that link to loses it, along with every date you open in that room. ${closing}`,
         confirmLabel: "Turn off",
         tone: "danger" as const,
       };

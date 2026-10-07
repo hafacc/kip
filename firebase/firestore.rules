@@ -91,6 +91,16 @@ service cloud.firestore {
         : '';
     }
 
+    // The same question for a READ, in one lookup where slotHolder spends two —
+    // exists() and get() on one path are counted apart — which is what keeps a
+    // date-link visitor inside 10 on dates someone else has taken. A booking
+    // that is gone makes this an error rather than a no, and the clauses after
+    // it still get their say.
+    function holdsSlot(bookingId) {
+      return bookingId is string
+        && get(/databases/$(database)/documents/bookings/$(bookingId)).data.guestId == request.auth.uid;
+    }
+
     // Same pointer shape as sharesStayWith — inert once the booking isn't CONFIRMED.
     function guestOfListing(listingId) {
       return request.auth != null
@@ -266,6 +276,36 @@ service cloud.firestore {
       return portalGrant(get(/databases/$(database)/documents/listings/$(listingId)/windows/$(windowId)).data.get('publicPortalId', null))
           || portalGrant(get(/databases/$(database)/documents/listings/$(listingId)).data.get('publicPortalId', null))
           || portalGrant(get(/databases/$(database)/documents/users/$(listingOwner(listingId))/settings/prefs).data.get('profilePortalId', null));
+    }
+
+    // The token of the room a set of dates offers, or null: for the whole
+    // place, a place with no rooms, a room since removed, or one with no link.
+    // Free wherever the listing is already looked up.
+    function roomToken(listingId, roomId) {
+      return roomId is string
+        ? get(/databases/$(database)/documents/listings/$(listingId)).data.get(['rooms', roomId, 'publicPortalId'], null)
+        : null;
+    }
+
+    // A room link is checked on its own, and only when the ask says it came
+    // through one: all four links can cover one window, and a fourth token
+    // check would take a share-link ask past the 10 lookups one write gets.
+    function roomLinkCoversWindow(listingId, windowId) {
+      return portalGrant(roomToken(
+        listingId,
+        get(/databases/$(database)/documents/listings/$(listingId)/windows/$(windowId)).data.get('roomId', null)));
+    }
+
+    // The grant alone, without the portal behind it, and that is the lookup
+    // budget rather than an oversight: a slot-link visitor reaches this clause
+    // having already spent 7 on the checks above it and still needs 2 for
+    // their own, so a single-document read has room for exactly one here. It
+    // rests on the token and its portal always moving in one commit — publish,
+    // revoke, regenerate and removing the room all write both.
+    function roomGrant(token) {
+      return token != null
+        && request.auth != null
+        && exists(/databases/$(database)/documents/portals/$(token)/grants/$(request.auth.uid));
     }
 
     // No list, so a private account is indistinguishable from one that never
@@ -454,24 +494,39 @@ service cloud.firestore {
         // Three separate grant checks because all three links can cover one
         // window at once and a rule compares one value at a time. Same ordering
         // discipline as the listing rule. The holder check stands alone (a grant
-        // lapses long before a stay does) and goes last because, like the slot's
-        // own grant above it, it costs a lookup per document rather than one for
-        // the whole query.
+        // lapses long before a stay does).
+        //
+        // The last three are ordered by what a single-document read can afford,
+        // which is 10 lookups against a chain that would otherwise reach 12.
+        // The holder goes first of them: free on an open slot, one lookup on a
+        // taken one. The room link is next and OPEN-only — its visitor reads
+        // their own stay as its holder — so it and the holder check are never
+        // both paid for. It also has to precede the slot's own link, which
+        // costs two per linked slot and would sink a room's query. The slot
+        // link is last and lands on exactly 10.
         allow read: if request.auth.uid == listingOwner(listingId)
           || isFriendOf(listingOwner(listingId))
           || portalGrant(get(/databases/$(database)/documents/listings/$(listingId)).data.get('publicPortalId', null))
           || portalGrant(get(/databases/$(database)/documents/users/$(listingOwner(listingId))/settings/prefs).data.get('profilePortalId', null))
-          || portalGrant(resource.data.get('publicPortalId', null))
-          || slotHolder(resource.data.get('bookingId', null)) == request.auth.uid;
+          || holdsSlot(resource.data.get('bookingId', null))
+          || (resource.data.status == 'OPEN'
+              && roomGrant(roomToken(listingId, resource.data.get('roomId', null))))
+          || portalGrant(resource.data.get('publicPortalId', null));
         // Born free, or an owner could create one already BOOKED naming anyone as
-        // holder and hand them a standing read of it.
+        // holder and hand them a standing read of it. A room's dates must name a
+        // room the place has.
         allow create: if isSignedIn()
           && request.auth.uid == listingOwner(listingId)
           && request.resource.data.status == 'OPEN'
-          && request.resource.data.get('bookingId', null) == null;
+          && request.resource.data.get('bookingId', null) == null
+          && (request.resource.data.get('roomId', null) == null
+              || request.resource.data.roomId in get(/databases/$(database)/documents/listings/$(listingId)).data.get('rooms', {}));
         allow delete: if isSignedIn() && request.auth.uid == listingOwner(listingId);
         allow update: if isSignedIn()
           && ((request.auth.uid == listingOwner(listingId)
+                  // Which room the dates offer is fixed at birth: an ask is
+                  // for a room, and moving the slot would move the ask.
+                  && request.resource.data.get('roomId', null) == resource.data.get('roomId', null)
                   // Dates freeze once BOOKED (a stay is an agreement about
                   // specific nights) and once past (reviving them would revive
                   // the stale asks pointing at them). Both guards read the
@@ -529,7 +584,8 @@ service cloud.firestore {
       // spends exactly the 10 lookups a single-document write is allowed.
       allow create: if isSignedIn()
         && request.auth.uid == request.resource.data.guestId
-        && request.resource.data.keys().hasOnly(['listingId', 'ownerId', 'guestId', 'windowId', 'start', 'end', 'status', 'cancelledBy', 'cancelReason', 'hiddenBy', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['listingId', 'ownerId', 'guestId', 'windowId', 'start', 'end', 'status', 'cancelledBy', 'cancelReason', 'hiddenBy', 'createdAt', 'via'])
+        && request.resource.data.get('via', null) in [null, 'ROOM']
         && request.resource.data.get('hiddenBy', []) == []
         && request.resource.data.createdAt == request.time
         && request.resource.data.ownerId == listingOwner(request.resource.data.listingId)
@@ -542,8 +598,12 @@ service cloud.firestore {
                 || (request.resource.data.status == 'CONFIRMED'
                     && windowInstantlyBookable(request.resource.data.listingId, request.resource.data.windowId)
                     && slotHandedTo(request.resource.data, bookingId))))
+          // `via` picks which links are checked, never whether one is: an
+          // ask marked ROOM stands on the room's link alone.
           || (request.resource.data.status == 'REQUESTED'
-              && portalCoversWindow(request.resource.data.listingId, request.resource.data.windowId))
+              && (request.resource.data.get('via', null) == 'ROOM'
+                  ? roomLinkCoversWindow(request.resource.data.listingId, request.resource.data.windowId)
+                  : portalCoversWindow(request.resource.data.listingId, request.resource.data.windowId)))
         );
       // The transition graph, not just the fields: CANCELLED is an ending,
       // CONFIRMED comes only from REQUESTED, and REQUESTED is a birth state
@@ -590,13 +650,14 @@ service cloud.firestore {
       // would open a connect route to a person who never shared one. A SLOT
       // link's `listings` room copy stays unpinned — rules can't check a list of
       // maps, and it only ever describes the owner's own place to a visitor.
+      // A ROOM link's `room` copy is unpinned on the same terms.
       allow create: if isSignedIn()
         && request.auth.uid == request.resource.data.ownerId
-        && request.resource.data.scope in ['USER', 'LISTING', 'SLOT']
+        && request.resource.data.scope in ['USER', 'LISTING', 'SLOT', 'ROOM']
         && portalOwnerCopyTrue(request.resource.data);
       allow update: if isSignedIn()
         && request.auth.uid == resource.data.ownerId
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownerName', 'ownerPhotoURL', 'listings'])
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownerName', 'ownerPhotoURL', 'listings', 'room'])
         && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['ownerName', 'ownerPhotoURL'])
             || portalOwnerCopyTrue(request.resource.data));
       allow delete: if isSignedIn() && request.auth.uid == resource.data.ownerId;

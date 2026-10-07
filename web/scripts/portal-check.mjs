@@ -339,6 +339,186 @@ expect(
   String(typedNumber).slice(0, 200),
 );
 
+console.log("\na room's link shows that room and nothing else in the house");
+// Its own host, so the profile link above keeps exactly the one place it
+// asserts on.
+const HOST2 = `host-rooms-check-${RUN}`;
+const HOUSE = `portal-check-house-${RUN}`;
+const ROOM_TOKEN = `portal-check-room-token-${RUN}`;
+const HOUSE_TOKEN = `portal-check-house-token-${RUN}`;
+const houseYear = new Date().getUTCFullYear() + 1;
+const room = (name, note, order, token) => ({
+  mapValue: {
+    fields: {
+      name: str(name),
+      note: str(note),
+      photos: { arrayValue: {} },
+      publicPortalId: token ? str(token) : { nullValue: null },
+      order: { integerValue: String(order) },
+    },
+  },
+});
+await put(`users/${HOST2}`, {
+  displayName: str("Erik Host"),
+  username: str(""),
+  searchable: { booleanValue: false },
+  createdAt: ts("2026-08-01T00:00:00Z"),
+});
+await put(`listings/${HOUSE}`, {
+  ownerId: str(HOST2),
+  title: str("The tall house"),
+  location: {
+    mapValue: {
+      fields: {
+        label: str("Oakland, CA"),
+        lat: { doubleValue: 37.8 },
+        lng: { doubleValue: -122.27 },
+        geohash: str("9q9p1d"),
+      },
+    },
+  },
+  type: str("HOUSE"),
+  description: str("A house with rooms"),
+  photos: { arrayValue: {} },
+  publicPortalId: str(HOUSE_TOKEN),
+  rooms: {
+    mapValue: {
+      fields: {
+        "room-back": room("Back bedroom", "Ground floor, double bed", 0, ROOM_TOKEN),
+        "room-attic": room("Attic room", "Up a steep ladder", 1, null),
+      },
+    },
+  },
+  createdAt: ts("2026-08-01T00:00:00Z"),
+});
+// What `publishRoomPortal` writes: the room's own copy, and where it is.
+await put(`portals/${ROOM_TOKEN}`, {
+  scope: str("ROOM"),
+  ownerId: str(HOST2),
+  ownerName: str("Erik Host"),
+  ownerPhotoURL: { nullValue: null },
+  listingId: str(HOUSE),
+  roomId: str("room-back"),
+  room: {
+    mapValue: {
+      fields: {
+        name: str("Back bedroom"),
+        note: str("Ground floor, double bed"),
+        photos: { arrayValue: {} },
+        houseTitle: str("The tall house"),
+        houseType: str("HOUSE"),
+        locationLabel: str("Oakland, CA"),
+      },
+    },
+  },
+  createdAt: ts("2026-08-01T00:00:00Z"),
+});
+await put(`portals/${HOUSE_TOKEN}`, {
+  scope: str("LISTING"),
+  ownerId: str(HOST2),
+  ownerName: str("Erik Host"),
+  ownerPhotoURL: { nullValue: null },
+  listingId: str(HOUSE),
+  createdAt: ts("2026-08-01T00:00:00Z"),
+});
+const slot = (start, end, roomId) => ({
+  start: str(`${houseYear}-${start}`),
+  end: str(`${houseYear}-${end}`),
+  status: str("OPEN"),
+  bookingId: { nullValue: null },
+  autoAccept: { booleanValue: false },
+  details: str(""),
+  roomId: roomId ? str(roomId) : { nullValue: null },
+  publicPortalId: { nullValue: null },
+  createdAt: ts("2026-08-01T00:00:00Z"),
+});
+await put(`listings/${HOUSE}/windows/back`, slot("11-06", "11-09", "room-back"));
+await put(`listings/${HOUSE}/windows/attic`, slot("11-13", "11-16", "room-attic"));
+await put(`listings/${HOUSE}/windows/whole`, slot("11-20", "11-29", null));
+
+// A fragment change is not a load, so each link is opened by a real reload:
+// otherwise the last page's sheet and state are still standing over this one.
+async function open(token) {
+  await page.go(`${APP}/portal/#${token}`, 1000);
+  await page.evaluate(`location.reload(); "reloading"`);
+  await new Promise((r) => setTimeout(r, 9000));
+  reportThrown();
+  return page.evaluate("document.querySelector('main').innerText");
+}
+
+const roomPage = String(await open(ROOM_TOKEN));
+const roomFlat = roomPage.replace(/\n+/g, " | ");
+expect("the room link resolves", !roomPage.includes("isn't active") && roomPage.includes("Erik Host"), roomFlat.slice(0, 120));
+expect("it shows the room", roomPage.includes("Back bedroom") && roomPage.includes("Ground floor, double bed"), roomFlat.slice(0, 240));
+expect("it names the house it is in", roomPage.includes("In The tall house · Oakland, CA"), roomFlat.slice(0, 240));
+expect(
+  "it shows that room's open dates",
+  roomPage.includes("Nov 6 – Nov 9") && (roomPage.match(/Request/g) ?? []).length === 1,
+  roomFlat.slice(0, 300),
+);
+expect(
+  "and nothing else in the house",
+  !roomPage.includes("Attic room") &&
+    !roomPage.includes("Nov 13") &&
+    !roomPage.includes("Nov 20") &&
+    !roomPage.includes("Whole house") &&
+    !roomPage.includes("A house with rooms"),
+  roomFlat.slice(0, 300),
+);
+
+console.log("\nasking through a room link lands as a request that says so");
+const asked = await page.evaluate(`
+(async () => {
+  const ask = [...document.querySelectorAll("main button")].find(b => b.textContent.trim() === "Request");
+  if (!ask) return "no request control";
+  ask.click();
+  await new Promise(r => setTimeout(r, 8000));
+  return document.querySelector("main").innerText;
+})()
+`);
+reportThrown();
+expect(
+  "the page says it was sent",
+  String(asked).includes("Requested") && !String(asked).includes("didn't go through"),
+  String(asked).replace(/\n+/g, " | ").slice(-260),
+);
+const roomAsks = await query("bookings", "ownerId", HOST2);
+const roomAsk = roomAsks[0]?.fields;
+expect("exactly one request reached that host", roomAsks.length === 1, JSON.stringify(roomAsks).slice(0, 140));
+expect(
+  "it is REQUESTED and marked as coming through a room link",
+  roomAsk?.status?.stringValue === "REQUESTED" && roomAsk?.via?.stringValue === "ROOM",
+  JSON.stringify({ status: roomAsk?.status, via: roomAsk?.via }),
+);
+expect(
+  "it is for the room's own dates",
+  roomAsk?.windowId?.stringValue === "back" && roomAsk?.start?.stringValue?.endsWith("-11-06"),
+  JSON.stringify({ window: roomAsk?.windowId, start: roomAsk?.start }),
+);
+
+console.log("\nthe house's link groups dates under the whole house and each room");
+const housePage = String(await open(HOUSE_TOKEN));
+const houseFlat = housePage.replace(/\n+/g, " | ");
+expect("the house link resolves", housePage.includes("The tall house"), houseFlat.slice(0, 160));
+// Upper-cased by CSS, and innerText reports it as drawn.
+expect("the chip counts the rooms", /house · 2 rooms/i.test(housePage), houseFlat.slice(0, 200));
+const at = (words) => housePage.indexOf(words);
+expect(
+  "whole house first, then the rooms in order",
+  at("Whole house") > -1 &&
+    at("Whole house") < at("Nov 20") &&
+    at("Nov 20") < at("Back bedroom") &&
+    at("Back bedroom") < at("Nov 6") &&
+    at("Nov 6") < at("Attic room") &&
+    at("Attic room") < at("Nov 13"),
+  houseFlat.slice(0, 400),
+);
+expect(
+  "the ask made through the room's link shows here too",
+  (housePage.match(/Requested/g) ?? []).length === 1 && (housePage.match(/Request\b/g) ?? []).length === 2,
+  houseFlat.slice(0, 400),
+);
+
 reportThrown();
 if (failures.length) {
   console.log(`\n${failures.length} failed`);
