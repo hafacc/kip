@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { CHECK_ABANDON_MS, checkStep } from "../../functions/src/messages";
-import { CHECK_STALL_MS, formatUsNumber, probeState } from "../utils/sms";
+import { CHECK_STALL_MS, formatUsNumber, probeState } from "../src/lib/sms";
 
 // The bug this pins: the check button stuck disabled with a spinner, across
 // reloads, because the only thing that could ever clear it was a write from a

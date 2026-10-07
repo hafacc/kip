@@ -1,7 +1,7 @@
 # kip
 
 Friends-only space sharing: list a spare room or your whole place, mark when it's free, and let
-mutual friends book it for nothing. Monorepo with a Next.js web client (`web/`) and shared
+mutual friends book it for nothing. Monorepo with a SvelteKit web client (`web/`) and shared
 Firebase rules (`firebase/`); native mobile apps are a later phase. User-facing docs live in
 [README.md](./README.md); this file is for contributors and AI sessions.
 
@@ -79,7 +79,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   `friends` subcollections. Visibility checks ("can this user see this listing?") are then a
   single `exists(/users/$(ownerId)/friends/$(uid))` in rules — no graph traversal, no server.
   Accepting a request is one `writeBatch`: write both edges + delete the request, so we never
-  persist a half-formed friendship (`utils/friends.ts` `acceptRequest`). Either party deleting
+  persist a half-formed friendship (`src/lib/friends.ts` `acceptRequest`). Either party deleting
   unfriends both sides.
 - **Friend-request id is `${from}_${to}`.** Deterministic, so the rule authorizing the accepter
   to write into the requester's `friends` subcollection can look the request up by id, and
@@ -87,7 +87,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
 - **Public share links = capability-URL portals.** Making something public mints a `portals/{uuid}`
   doc whose id IS an unguessable UUID; knowing it is the capability. World-readable BY ID only
   (`get: if true`, no `list` → not enumerable), revoke = delete, regenerate = new uuid + delete old
-  (kills every old link). Four scopes share one spine (`utils/portals.ts`; the fourth, **ROOM**, is described under *Rooms in a place*): **USER** (all your
+  (kills every old link). Four scopes share one spine (`src/lib/portals.ts`; the fourth, **ROOM**, is described under *Rooms in a place*): **USER** (all your
   places, id in `prefs.profilePortalId`, control on your own PersonPage), **LISTING**
   (`listing.publicPortalId`, control in the RoomPage owner view's Sharing section), **SLOT**
   (`window.publicPortalId`, control in the per-slot Sheet on that same page).
@@ -134,7 +134,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   `onOwner` callback that fires the moment the portal doc lands, and the page paints the host block
   then, with skeletons where the rooms will be. Skeletons and not "Nothing shared here right now" —
   that line is a statement about an empty link, and saying it to someone whose rooms are still in
-  flight is worse than saying nothing. `layout.tsx` also preconnects the four Firebase hosts, since a
+  flight is worse than saying nothing. `src/routes/+layout.svelte` also preconnects the four Firebase hosts, since a
   stranger opening a link pays DNS and TLS for each of them with nothing warmed.
 
   Because a grant needs an identity, the share-link page signs visitors in **anonymously** on load
@@ -144,7 +144,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   **Two rules keep that from eating a real session**, and both were learned the hard way — opening a
   link you'd been sent while signed in silently replaced your account with an empty anonymous one
   and then asked you to pick a display name.
-  1. `ensureAnonymous` awaits `authSettled()` (`utils/auth.ts`) before deciding. Firebase restores a
+  1. `ensureAnonymous` awaits `authSettled()` (`src/lib/auth.ts`) before deciding. Firebase restores a
      persisted session ASYNCHRONOUSLY, so `auth().currentUser` is null for a beat after load even
      for someone who is signed in; reading it directly mistakes them for a stranger.
 
@@ -157,7 +157,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   2. **An anonymous session is a participant, not a signed-out one.** This USED to gate on
      `!user || anonymous`, on the reasoning that a ticket is not an account. It no longer holds:
      an anonymous account can carry a display name, a live ask and friendships, and every rule it
-     meets is blind to how it signed in. `app/page.tsx` gates on `!user` alone. What replaced the
+     meets is blind to how it signed in. `src/routes/(app)/+page.svelte` gates on `!user` alone. What replaced the
      old reasoning is `displayName` — `AuthMenu` hides for an ANONYMOUS session until there is one,
      because a nameless visitor has no profile to show. A nameless account with a credential keeps
      the menu, since Settings and the exit live only there and the name sheet can be dismissed. The
@@ -170,17 +170,18 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   to `authStateSubscription` inside `if (this.lastNotifiedUid !== currentUid)`. Linking an anonymous
   account KEEPS the uid, so signing up from a share link fired nothing at all, and Firebase compounds
   it by mutating the `User` object **in place** (`Object.assign(user, updates)` in
-  `_reloadWithoutSaving`) — so even a `setUser(next)` would hand React the same reference and bail
-  out of the render. The visible bug: a visitor tapped "Ask to be friends", created an account in the
+  `_reloadWithoutSaving`) — so even assigning it to the store's `user` again hands Svelte the same
+  reference, which is no change at all, and nothing reading it re-runs. The visible bug: a visitor
+  tapped "Ask to be friends", created an account in the
   sheet, and the sheet stayed sitting over the button, because `identified` was still computing
   `false`. Reloading the page fixed it, which is why it looked intermittent.
 
   So the mutable fields the app branches on — `isAnonymous` and `emailVerified` — are **snapshotted
-  into store state** (`anonymous`, `emailVerified`) and read from there, never off `user`. Anything
-  that branches on a field Firebase can change without a uid change belongs in that pair; reading it
-  off `user` at render is the bug, not the exception. Watching the token also fires on hourly
-  refreshes, which is free — the `User` reference is unchanged, so `setUser` bails and no listener
-  effect re-runs.
+  into store state** (`anonymous`, `emailVerified`) by the listener itself and read from there, never
+  off `user`. Anything that branches on a field Firebase can change without a uid change belongs
+  beside that pair (`email`, `phone` and `doors` already do); reading it off `kip.user` is the bug,
+  not the exception. Watching the token also fires on hourly refreshes, which is free — the `User`
+  reference and every snapshot are unchanged, so no effect re-runs.
 
   **A tap on the share-link page is never a no-op, and that is a rule about the STATE MACHINE, not
   about one bug.** Tapping holds the ask in `ask` and lets an effect send it once the sender is
@@ -224,14 +225,16 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   removing it brings the dead button straight back with every other check still green.
 
   `emailVerified` rides along for the same structural reason, but note what that does NOT fix:
-  nothing in `web/` calls `user.reload()`, the proactive token refresh doesn't reload either, and the
-  verification link opens on Firebase's own action origin, so **verifying in another tab and coming
-  back still leaves the Home prompt up until a reload**. Closing that would mean reloading the auth
-  user on focus or visibilitychange; the snapshot is what makes such a fix land on screen at all.
+  the store reloads the auth user on focus and visibilitychange only while the session is ANONYMOUS
+  (that is how an address attached from another browser arrives), the proactive token refresh doesn't
+  reload, and the verification link opens on Firebase's own action origin, so for an account that
+  already has a credential **verifying in another tab and coming back still leaves the Home prompt up
+  until a reload**. Closing that would mean widening that reload to unverified accounts; the snapshot
+  is what makes such a fix land on screen at all.
 
   **A uid-keyed capability must survive the visitor getting an account, and there are two halves to
   that.** Creating an account **links** the anonymous one (`linkWithPopup` / `linkWithCredential` in
-  `utils/auth.ts`), so the uid doesn't change and the grant still belongs to them. But linking is
+  `src/lib/auth.ts`), so the uid doesn't change and the grant still belongs to them. But linking is
   impossible when the credential already belongs to a real account — they're signing IN, not up — so
   that path falls back to a normal sign-in and the uid DOES change. Hence the second half: the grant
   is re-claimed at the point of use, immediately before the write that needs it. Either half alone
@@ -243,7 +246,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   *distinct* paths its rule touches, not the number of documents returned. Two consequences:
   - **Clause order matters.** `isFriendOf` and the room/profile grants — one shared lookup each,
     covering a whole query — come BEFORE the per-document slot grant and guest marker.
-  - **Browse is chunked at 20 friends** (`BROWSE_CHUNK`, `utils/listings.ts`), NOT the 30 an `in`
+  - **Browse is chunked at 20 friends** (`BROWSE_CHUNK`, `src/lib/listings.ts`), NOT the 30 an `in`
     filter allows. Each friend's listing costs one `exists()` on their friends edge, so 25 distinct
     friends in one query is refused outright — 30 places across 3 friends is fine. This was a live
     bug (the chunk was 30), found by testing the limit rather than reasoning about it. 20 is the
@@ -335,7 +338,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   60 days after checkout, the same ISO parsing as `stillCurrent`), which needs no state machine: a
   pointer issued while a stay was fresh simply stops matching, with no sweep and nothing to revoke.
   The store's counterpart lookup mirrors it (`endedWithin` and `STAY_SIGHT_DAYS` in
-  `utils/format.ts`), in UTC like the rule rather than the local date the rest of the client uses,
+  `src/lib/format.ts`), in UTC like the rule rather than the local date the rest of the client uses,
   since its whole job is predicting what the rule will allow — a pointer it can't use would leave the
   name unresolved.
 
@@ -410,7 +413,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   order-free by `bookingJoins`). That third one exists because a share-link guest and their host are
   the one pair who demonstrably know each other and the one pair neither of the others can serve —
   neither is searchable to the other, and neither holds the other's link. `${from}_${to}` is the
-  right key here: one pending friendship ask per pair. `utils/requests.ts` owns it. **A route that
+  right key here: one pending friendship ask per pair. `src/lib/requests.ts` owns it. **A route that
   is NAMED must hold even when another would have done**: a `portalId` or `bookingId` on the request
   is checked even for a searchable recipient, since the card says "via your link" or "you stayed
   together" on the strength of it.
@@ -428,7 +431,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   only in the sender's own list, on a document only the two parties can read. Nobody to mislead.
 - **Discovery is opt-in, and a handle is optional.** A fresh account is **unreachable**: onboarding
   asks for a *display name only* — collected just in time by the identity sheet
-  (`components/name-gate.tsx`, and the portal page's own copy), never a blocking screen — and
+  (`src/lib/components/name-gate.svelte`, and the portal page's own copy), never a blocking screen — and
   nobody can initiate contact until you turn on one of **two independent avenues**
   in Settings → *Who can find you*:
   - **Searchable** (`users/{uid}.searchable`) — findable by handle. Requires a username, so the
@@ -472,7 +475,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   what makes going private reversible: your name can't be released and re-squatted while you're
   unsearchable, so you can flip searchability back on and still be yourself. (The Settings claim
   flow confirms this before writing.) **Uniqueness is functionless:** `claimUsername`
-  (`utils/username.ts`) writes the registry entry and the profile in ONE batch; a collision hits the
+  (`src/lib/username.ts`) writes the registry entry and the profile in ONE batch; a collision hits the
   registry's owner-only `update` rule and is denied, taking the profile write down with it. **The
   batch is required, and it is what caps an account at one handle:** the registry refuses an entry
   the profile doesn't name once the commit lands (`getAfter`), and a profile's handle can only go
@@ -533,11 +536,11 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   Opening a slot also **names it in the URL** (in place, so it adds nothing to go back through) —
   tapping a request pushes the booking on top of it, and back returns to the slot still open instead
   of a room that has forgotten which one it was. That is why a room's `windowId` is deliberately NOT
-  part of `screenKey` in `app/page.tsx`: a sheet is an overlay on the room, not a different screen,
+  part of `screenKey` in `src/routes/(app)/+page.svelte`: a sheet is an overlay on the room, not a different screen,
   and counting it scrolled the page under the sheet to the top on open and again on close. For the
-  same family of reason `replaceEntry` now carries `historyScroll()` forward — a replace changes what
-  an entry POINTS AT, not where the reader is standing in it, and defaulting to 0 meant every in-place
-  rewrite silently forgot the position.
+  same family of reason `replaceEntry` keeps the entry's id, which is what its scroll offset is
+  remembered under — a replace changes what an entry POINTS AT, not where the reader is standing in
+  it.
 
   **A slot holds at most one stay, and is born free.** `bookingMatchesOpenSlot` requires the slot to
   be `OPEN` as well as to hold the claimed dates, at BOTH ends of a stay's life — asking and
@@ -558,7 +561,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   direction this schema has spent several passes escaping, and would add an invisible-but-live slot
   that still has to block overlaps and still backs a live share link.
 
-  Overlapping slots are rejected in the CLIENT (`findOverlap`, `utils/listings.ts`), not the rules —
+  Overlapping slots are rejected in the CLIENT (`findOverlap`, `src/lib/listings.ts`), not the rules —
   a rule can't query sibling documents, and the only person a clash hurts is the owner whose own
   calendar it is, so a crafted client gains nothing by skipping the check. `end` is exclusive, so
   ranges that merely touch are allowed.
@@ -621,7 +624,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   after create: an ask is for a room, and moving the slot would move the ask. Ticking several rooms
   in the add-dates sheet writes one slot per room (`addRoomWindows`, one batch); the sheet opens
   with every room ticked. **A room and the whole place can't be free on the same nights, and that
-  is the client's check** (`findOverlap` in `utils/rooms.ts`), for the reason every overlap is: a
+  is the client's check** (`findOverlap` in `src/lib/rooms.ts`), for the reason every overlap is: a
   rule can't read sibling slots, and the only calendar it protects is the owner's own. A
   whole-place range clashes with everything; a room's clashes with that room's and the whole
   place's; two rooms overlap freely. Double booking is unaffected, since a slot still holds one stay.
@@ -654,7 +657,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   cancelled as `SLOT_CANCELLED`, then the slots, their links, the room's link and photos, and last
   the map entry. Search treats a room's dates as type Room and whole-place dates as the listing's
   type, so a search for rooms finds a house with a free room. A booking carries no room: surfaces
-  that name one read it off the slot (`use-stay-place.ts`), and notification bodies say "Back
+  that name one read it off the slot (`use-stay-place.svelte.ts`), and notification bodies say "Back
   bedroom at Erik's house" when the slot and room can still be read — never the subject, which is
   also the text message and has no room for an uncapped name.
 - **Check-out instructions are their own documents, because they can hold a door code.** A host
@@ -679,7 +682,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   cancel of a `CONFIRMED` stay reopens the window itself in the same batch (`BOOKED -> OPEN`,
   clear `bookingId`) — a rule clause lets the booker, and only the booker, do that release. A
   pending `REQUESTED` booking left the window `OPEN`, so guest cancel there just marks the booking
-  `CANCELLED` (see `utils/bookings.ts`). Windows carry a free-form `details` string (not tags).
+  `CANCELLED` (see `src/lib/bookings.ts`). Windows carry a free-form `details` string (not tags).
 
   **Taking or freeing a slot travels with the booking's own transition, in the same commit, for
   guest and host alike.** A slot's status is `OPEN` or `BOOKED` and nothing else. Marking it
@@ -689,7 +692,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   (`stayEndedWith`), unless that booking no longer exists, since then there is nothing left to end.
   Otherwise the stay stays `CONFIRMED` on nights the slot is now offering to someone else.
 - **Dates that have been and gone stop being availability.** A slot is live while `end >= today`,
-  today being the LOCAL date (`isExpired`/`todayIso`, `utils/format.ts`) — the same boundary Trips uses to split upcoming from past, so a
+  today being the LOCAL date (`isExpired`/`todayIso`, `src/lib/format.ts`) — the same boundary Trips uses to split upcoming from past, so a
   slot and a stay stop being current on the same day. Nothing else ages a window out: `status` only
   ever says OPEN or BOOKED, so without this a slot from last year stayed bookable forever, offered
   in Browse, on a place card, in a friend's view of a room, and through a share link. Filtered in
@@ -759,10 +762,10 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   answers nothing, so a plain ask then goes ahead and Firestore queues it.
 - **Search is client-side.** Each user only sees friends' listings (a small set), so Browse
   fetches all friends' listings + windows once (`fetchFriendListings` chunks the `in` filter at
-  20 uids, `BROWSE_CHUNK` — the rules' lookup budget, see above) and filters by date/type/distance in `utils/search.ts`. This sidesteps Firestore's
+  20 uids, `BROWSE_CHUNK` — the rules' lookup budget, see above) and filters by date/type/distance in `src/lib/search.ts`. This sidesteps Firestore's
   inability to combine a geo range with a date range, and keeps `firestore.indexes.json` empty.
 - **Counting a saved search costs no reads, which is the whole reason it exists.** `refreshBrowse`
-  runs in the store provider on mount, unconditionally — so every screen already holds every
+  runs from an effect in the store itself, whatever screen is up — so every screen already holds every
   friend's listings and windows. A saved search is just a stored `SearchCriteria`, and its count is
   one `searchListings` pass over data that is already in memory. Ten of them are ten array passes,
   not ten queries. The feature is not literally read-free: `watchSavedSearches` is one more listener
@@ -776,7 +779,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   unbounded deliberately so a search past the cap is still visible and still removable.
 
   **Two surfaces, and Browse gained no new control.** Home lists them, because that's where you see
-  them without going looking. `SavedSearches` (`components/saved-searches.tsx`) is the same list
+  them without going looking. `SavedSearches` (`src/lib/components/saved-searches.svelte`) is the same list
   again at the BOTTOM of the filter sheet — the place a search is composed is the place to keep one
   or pick one up again. It sits below the sheet's footer on purpose: tweaking dates is the common
   reason to open it, so "Show N places" must stay reachable without scrolling past a list.
@@ -818,7 +821,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
 - **Geohash for distance.** Listings store a `geohash` (via `geofire-common`) computed from
   lat/lng on write; Browse ranks by `distanceBetween`. Coordinates are optional in the listing
   form for now (no geocoder yet) — distance filtering is a no-op until they're filled in.
-- **Live for mine, fetched for theirs.** The store (`utils/store.tsx`) keeps live `onSnapshot`
+- **Live for mine, fetched for theirs.** The store (`src/lib/store.svelte.ts`) keeps live `onSnapshot`
   listeners on everything the signed-in user owns (prefs, friends, requests, my
   listings + their windows, my trips, incoming bookings) and a manual `refreshBrowse()` fetch
   for friends' listings, plus `tripListings` — a by-id fetch of any listing one of your trips points
@@ -839,7 +842,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   returning user through onboarding, whose `createProfile` write merges over the name they already
   have; as a verdict it tells an ordinary successful load that the device can't reach kip. (A plain
   listener swallowing it is how a share-link visitor wedged on a permanent splash in production.) So
-  `classifySnapshot` (`utils/profile-gate.ts`) sorts every snapshot into an ANSWER — the profile from
+  `classifySnapshot` (`src/lib/profile-gate.ts`) sorts every snapshot into an ANSWER — the profile from
   cache or server, or a server-confirmed absence — or UNPROVEN, an absence from cache, which
   `watchOwnProfile` settles by asking the cache which of the two raised it. What makes one listener
   sufficient is `includeMetadataChanges: true`, load-bearing twice over and probed against the SDK rather than
@@ -864,7 +867,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
     rather than the uid, since a `generation` re-attach opens a new listener for the SAME person and
     the straggler carries the right uid. A late `null` read as "no profile" opened the identity sheet
     over someone who already had a name; a late silence flipped the can't-reach-kip screen and logged
-    a false incident. `attempt()` (`utils/profile-gate.ts`, pinned in `tests/profile-gate.test.ts`)
+    a false incident. `attempt()` (`src/lib/profile-gate.ts`, pinned in `tests/profile-gate.test.ts`)
     is one counter serving both ordering and teardown, which is what lets the store set the profile
     unconditionally — a second guard there would state the same contract twice and drift.
   - **Recovery re-raises.** Confirming a cached absence changes no document DATA, so a plain
@@ -889,8 +892,8 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   cache lease. Firing late or spuriously costs a no-op event: it can never shut an open gate, and a
   later answer still opens a shut one.
 
-  **The transitions are a pure reducer** — `gateStep` in `utils/profile-gate.ts`, pinned by
-  `tests/profile-gate.test.ts`, the same split as `reattach.ts`: the effect needs React, Firebase
+  **The transitions are a pure reducer** — `gateStep` in `src/lib/profile-gate.ts`, pinned by
+  `tests/profile-gate.test.ts`, the same split as `reattach.ts`: the effect needs Svelte, Firebase
   and a live session to exercise, the state machine needs none of them. Its invariants are each a
   bug that existed or nearly did:
   - **An opening belongs to a session.** A `generation` re-attach for the uid the gate is open for
@@ -900,10 +903,10 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
     until something answers; clearing it on each attach flashed error → splash → error at every
     step of the 500ms/2s/6s ladder. A new uid starts clean.
   - **Silence once the gate is open changes nothing** — that is the re-attach machinery's problem.
-  - **Never open and unreachable at once**, which is what entitles `page.tsx` to render Unreachable
+  - **Never open and unreachable at once**, which is what entitles `+page.svelte` to render Unreachable
     only behind a shut gate.
 - **Friends-only, and nothing blocks on enrolment.** Nothing is public, so a visitor with no
-  session at all only ever sees `components/welcome-screen.tsx` — the landing page, which is one
+  session at all only ever sees `src/lib/components/welcome-screen.svelte` — the landing page, which is one
   screen, fits without scrolling at 390×844 (measured, not eyeballed), and carries no photograph,
   no feature list and no second section. **The smallness is the design.** Almost everyone who
   arrives was sent a link by a friend, so they are already half-invited: the page's job is to
@@ -914,7 +917,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
 
   It says a friend's link is how most people start, and offers ONE door for both arriving and
   returning. **There is no password**, and nothing anywhere says "sign
-  up". Three doors, all passwordless, all wrapped by `utils/auth.ts`: an emailed one-time link
+  up". Three doors, all passwordless, all wrapped by `src/lib/auth.ts`: an emailed one-time link
   (`sendReturnLink` to come back, `sendAttachLink` to add an address to the account already
   asking), a texted one-time code (US numbers only — that is the SMS region allowlist, and
   `parseDestination` refuses anything else rather than letting the server bill for a refusal), and
@@ -953,20 +956,20 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
 
   **`email` rides across so a lost fragment fails loudly:** the page refuses a link with no address.
   Left in the query, an ATTACH link would look exactly like a RETURNING one and sign someone into a
-  second account instead of joining the first. `routable()` skips `/continue/` for the same family
-  of reason it skips `/portal/` — a route written over either fragment destroys it.
+  second account instead of joining the first. `routable()` is false on `/continue/` for the same
+  family of reason it is false on `/portal/` — a route written over either fragment destroys it.
 
-  **One attempt owns the outcome, and cancelling is a newer attempt rather than a teardown.**
-  StrictMode remounts, the second run is correctly refused by `spent`, and a teardown that muted the
-  first threw away the only answer and its timer, leaving the page on "working" for ever. Dev-only,
-  so only `check:host` — which waits for the redirect instead of navigating itself — ever sees it.
+  **One attempt owns a failure or a stall, and cancelling is a newer attempt rather than a
+  teardown.** The link is opened once, on mount, since its one-time code can be spent a single time;
+  **Try again** starts a newer attempt, and an older one still in flight may no longer report a
+  failure or a stall over it.
   **A success is the exception: it belongs to every attempt** (`finished`). A retry after a stall
   resends a code the stalled call may yet spend, so the retry's refusal can arrive before or after
   the success it lost to, and whichever succeeds wins. A RETURNING link that fails or stalls says so
   and offers **Open kip** (plus **Try again** on a stall), rather than stranding someone on a page
   with no way into the app.
 
-  **The code step is six boxes over ONE input, and the count is the point.** `components/ui/code-input.tsx`
+  **The code step is six boxes over ONE input, and the count is the point.** `src/lib/components/ui/code-input.svelte`
   draws six boxes wearing `Input`'s own shell and lays a single transparent `one-time-code` field
   across all of them, because the OS keyboard's "From Messages: 123456" strip, paste, backspace and
   select-all are things the platform already does to one field — six real inputs would mean
@@ -980,10 +983,13 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   that says what a finished code looks like; all four surfaces gate their button on it, where each
   used to ask whether `code` was non-empty and so offered to send a single digit.
 
-  One trap worth keeping: **React's `autoFocus` focuses the node itself during commit and never goes
-  through `onFocus`**, so `focused` is seeded from the prop. Left at `false` the field opened as six
+  One trap worth keeping: **the focus given on mount lands before the field's own `focus` listener
+  can be relied on to have said so**, so `focused` is seeded from the `autofocus` prop. Left at
+  `false` the field opened as six
   identical empty boxes with nothing saying where the next digit lands — proved in a browser, where
-  `document.activeElement` was already the input and every box still read `border-border`. A real
+  `document.activeElement` was already the input and every box still read `border-border`. The field
+  is focused by hand in an effect rather than left to the attribute, which only takes while nothing
+  else holds focus — and the code step replaces a field that did. A real
   tap fires both events normally; `element.blur()` and `element.click()` from a script do not, which
   is why that probe has to be a dispatched mouse event.
 
@@ -991,20 +997,20 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   which was a fair trade while standing copy filled it — the phone sheet's said adding a number was
   not agreeing to be texted, which the Notifications switch says where it bites. With nothing left
   to stand there it spent 32px of empty sheet under the button on every render, which reads as the
-  layout having broken. `Problem` stays MOUNTED and drops to zero height instead, in a gapless
+  layout having broken. The message line stays MOUNTED and drops to zero height instead, in a gapless
   wrapper with the button: a live region announces a CHANGE, so one that appears together with its
   text is one a screen reader never reads out.
 
-  `app/page.tsx` gates in order: `authReady` splash → **`WelcomeScreen`** (no session at all) →
+  `src/routes/(app)/+page.svelte` gates in order: `authReady` splash → **`WelcomeScreen`** (no session at all) →
   `profileReady` splash → the app. There is **no onboarding screen**: a missing display name is
-  collected by the identity sheet (`components/name-gate.tsx`, and the portal page's own copy) at
+  collected by the identity sheet (`src/lib/components/name-gate.svelte`, and the portal page's own copy) at
   the first action that puts your name in front of someone, so nothing blocks. A credentialed
   account with no name is offered that sheet unprompted **once per account**: dismissing it sticks,
   and after that only an action that needs a name brings it back. `AuthMenu` hides only for a
   nameless ANONYMOUS session, and withholds the exit from an account with no credential — see the
   sign-out note in the anonymous bullet.
 - **Leaving is possible, it dismantles rather than departs, and the SERVER finishes it.** The client
-  writes one document — `deletions/{uid}`, `utils/leave.ts` — and `onAccountDeletionRequested`
+  writes one document — `deletions/{uid}`, `src/lib/leave.ts` — and `onAccountDeletionRequested`
   (`functions/src/index.ts`, `functions/src/teardown.ts`) tears the account down with the Admin SDK
   in five named phases: cancel every future stay in both directions, delete the places (photos,
   slots, guest pointers), unfriend both sides and delete requests both ways, then prefs, saved
@@ -1072,16 +1078,16 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
 
   **The phases are a progress bar, and an ETA would have to lie** — how long this takes depends on
   how many stays, places and photos there are, which nothing knows without counting first. So there
-  is a fixed list (`DELETION_PHASES`, `utils/types.ts`, mirrored in `teardown.ts` and pinned by
-  `tests/drift.test.ts`) and `components/deletion-screen.tsx` draws a determinate bar over it. The
+  is a fixed list (`DELETION_PHASES`, `src/lib/types.ts`, mirrored in `teardown.ts` and pinned by
+  `tests/drift.test.ts`) and `src/lib/components/deletion-screen.svelte` draws a determinate bar over it. The
   bar counts the wait BEFORE the first phase as a step of its own and never fills, since the phase
   it names is the one still running. That field is also the only way a stuck teardown is visible at
-  all. `app/page.tsx` renders this AHEAD of the profile gate — the teardown deletes the profile
+  all. `src/routes/(app)/+page.svelte` renders this AHEAD of the profile gate — the teardown deletes the profile
   partway through, and the other reading of a missing profile is onboarding, which would put someone
   who asked to leave in front of a form asking their name and write it back. `deletionReady` is what
   stops the app being drawn in the beat before that document is answered for. It resets only when
   the uid changes, never on a `generation` re-attach, for the same reason `profileReady` doesn't:
-  `page.tsx` splashes while it is false.
+  `+page.svelte` splashes while it is false.
 
   **Failure is capped and says so.** Five attempts, counted in the document before the work so a run
   that takes the process with it still spends from the budget; past that the function writes `error`
@@ -1091,7 +1097,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
 
   **And a failure must not be a life sentence, which it was.** The document then stands forever —
   nothing else removes one: no TTL, and the reaper skips an account that still has a profile — while
-  `app/page.tsx` renders the deletion screen ahead of every other gate, on every device, from a
+  `src/routes/(app)/+page.svelte` renders the deletion screen ahead of every other gate, on every device, from a
   screen that had no controls on it at all. The only recovery was an operator with the Admin SDK.
 
   So the delete rule passes for the owner **when the document carries an error**, which is a
@@ -1102,7 +1108,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   had to move with it. The store treats the document VANISHING as the teardown finishing and signs
   out — correct, since the Auth account went with it — so it now only arms that reading while the
   request is live: the function never deletes one it wrote an error on, so a cleared failure is
-  somebody choosing to stay. And `NameGateProvider` opens its sheet for a credentialed account with
+  somebody choosing to stay. And `NameGate` opens its sheet for a credentialed account with
   no display name, which is exactly what an account is once the profile phase lands — so it asked
   the person who had just left what to call them, over the screen saying they were leaving, and sat
   on top of these controls. It stands down for a deletion now. Both are driven by
@@ -1131,13 +1137,9 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   THROWS past it, and the queries are single-equality with the rest filtered in memory because
   `firestore.indexes.json` is empty and nothing deploys a composite index.
 
-- **No secrets, runs unconfigured.** The Firebase web config is inlined in `utils/firebase.ts`
-  (values are public — security is in the rules). The repo currently **ships a populated
-  `hafaio-kip-dev` config**, so `firebaseConfigured()` is true and the real sign-in flow runs.
-  The unconfigured fallback still exists for a fresh clone with the config cleared: blank the
-  `appId` and `firebaseConfigured()` returns false — `authReady` settles immediately on the
-  sign-in screen and the sign-in button shows a "not set up yet" dialog — so the app still
-  builds and runs before any Firebase project exists.
+- **No secrets.** The Firebase web config is inlined in `src/lib/firebase.ts`
+  (values are public — security is in the rules), and it is the `hafaio-kip-dev` config, so a
+  fresh clone runs the real sign-in flow. There is no unconfigured mode.
 - **An account can hold more than the door it arrived through.** Settings → Account carries a
   **How you get in** group — email, phone, Google — each set, absent or in conflict, because an
   account with one credential is one lost inbox from unrecoverable and kip has no password to fall
@@ -1159,9 +1161,9 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
 
   **A credential that already belongs to someone else signs you INTO that account and changes the
   uid** (`sameAccount: false`), which has bitten twice; all three doors route it through one alert.
-  And the rows read `email`/`phone`/`doors` from **store state, never off `user` at render** —
+  And the rows read `email`/`phone`/`doors` from **store state, never off `user`** —
   Firebase mutates the `User` in place, so a link changes the fields without changing the reference
-  and React never re-renders. `unlink` is worse: it persists the shortened `providerData` and
+  and nothing reading them re-runs. `unlink` is worse: it persists the shortened `providerData` and
   notifies nobody, so `removeDoor` ends with a `reload()` to make the row follow the server.
 
 - **Settings is four sections, and Privacy is one question.** Account (display name, the doors above),
@@ -1169,7 +1171,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   **Notifications**, Appearance. Discoverability and stay-visibility were separate sections until
   they were read as the same question — who sees what about you — and merged.
 - **Tailwind v4 semantic tokens (Terra).** Warm palette as `--color-*` in `@theme`
-  (`app/globals.css`) with `.dark` overrides; components use `bg-surface`, `text-muted`,
+  (`src/app.css`) with `.dark` overrides; components use `bg-surface`, `text-muted`,
   `text-accent-ink` etc. — no raw hex in markup. Terra adds: a terracotta→amber gradient exposed as
   the `--gradient-accent` var + a `.bg-gradient-accent` utility (primary CTAs, avatar rings, Instant
   chips, badges, the wordmark tile, ON switches); `accent-ink`/`success-ink` darker text tones;
@@ -1179,7 +1181,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   **tonal elevation** (surfaces lighten, shadows nearly vanish) instead of shadow depth. The canvas
   is a warm near-white (`#f6f1ea`) with a faint fixed sunset radial glow; `--radius-*` is bumped to
   Terra's rounder scale (pills for controls/chips, `rounded-2xl`/`3xl` for surfaces).
-- **UI primitives = one source of truth for controls (`components/ui/`).** Every interactive
+- **UI primitives = one source of truth for controls (`src/lib/components/ui/`).** Every interactive
   control is a pill (`rounded-full`) primitive at a single **44px (`h-11`) control height**
   (thumb-friendly on mobile), so nothing looks stranded next to its neighbors: `Button` (variants
   `primary` = gradient + `shadow-glow`, `secondary` = tonal accent fill, `ghost`, `danger` =
@@ -1190,50 +1192,61 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   visible border + an accent focus ring**. `Sheet` is the shared modal surface (bottom sheet on
   mobile with a drag-handle bar + `rounded-t-3xl`, centered `rounded-3xl` card on ≥sm; backdrop +
   Escape dismiss, scroll-lock); the dialog renders through it. **It manages focus**: opening moves
-  focus into the sheet (unless a child's `autoFocus` already has), closing restores it to whatever
+  focus into the sheet — to the child carrying `autofocus` if there is one, which the panel focuses
+  itself, since the attribute alone only takes while nothing else holds focus and the control that
+  opened the sheet does — closing restores it to whatever
   opened it, and Tab is trapped inside. Open sheets form a stack, and Escape and Tab belong to the
   TOP one only, since a confirm raised over a sheet is its own sheet. A button that is working swaps
-  its label for a spinner through `components/ui/busy.tsx`, which keeps the label `sr-only`, or the
-  button is announced with no name at all. **It renders through a PORTAL onto
-  `<body>`, and that is load-bearing rather than tidy:** `fixed` resolves against the viewport only
+  its label for a spinner through `src/lib/components/ui/busy.svelte`, which keeps the label `sr-only`, or the
+  button is announced with no name at all. **Its panel is mounted onto
+  `<body>` as a tree of its own** (`sheet.svelte` mounts `sheet-panel.svelte` there while open),
+  **and that is load-bearing rather than tidy:** `fixed` resolves against the viewport only
   while no ancestor is a containing block, and `backdrop-filter` makes one — so the desktop `TopBar`,
   which is blurred, trapped a sheet opened from `AuthMenu` inside itself and collapsed it to a
   zero-height strip across the top. Any transform, filter or `will-change` would do the same, so it
   belongs in the primitive rather than at each caller: a modal must not be positioned by whatever
-  happens to contain the button that opened it. **Only ≥md could show it** — the mobile header carries
+  happens to contain the button that opened it. Mounted rather than moved, because a sheet that moved
+  its own node there could not be closed by its parent removing it. **Only ≥md could show it** — the mobile header carries
   no blur — which is exactly why phone-width screenshots of the feedback sheet looked right while it
   was broken, and why `check:feedback` measures the backdrop against the viewport at 1280 wide. `Segmented` (tonal pill track, active
   = white thumb) and `Switch` (labeled track/thumb, ON = gradient) round out the set. Lists use
   `Group` (a `rounded-3xl bg-surface shadow-card` with near-invisible `divide-y` — the **shadow is
   the separator**, no outer border) + `Row` (`min-h-14`) + `Section`/`SectionHeading` — flat grouped
   lists (iOS-Settings style), one action per surface, whole-row tap targets, never a row that clips
-  at 390px. **Status is a soft tonal `Chip`** (`components/ui/chip.tsx`, replaces the old
+  at 390px. **Status is a soft tonal `Chip`** (`src/lib/components/ui/chip.svelte`, replaces the old
   editorial byline): a low-contrast pill — `pending` (amber), `confirmed` (green), `open` (accent),
   `booked` (dimmed neutral), `instant` (gradient fill + bolt, white text), `type` (neutral outline
   for `Room`/`Flat`/`House`), `neutral` (cancelled). Low-contrast fills so a chip reads as a passive
   *label*, never as a button — used for slot/booking state, the booking-detail status, and listing
-  type. `CountBadge` (same file) is the gradient count pill on nav destinations. Mobile nav is a
-  **floating dock** (`FloatingDock` in `nav.tsx`, `md:hidden`, inset from the edges, `rounded-3xl`,
+  type. `CountBadge` (`count-badge.svelte`) is the gradient count pill on nav destinations. Mobile nav is a
+  **floating dock** (`floating-dock.svelte`, `md:hidden`, inset from the edges, `rounded-3xl`,
   translucent + `backdrop-blur`, `shadow-dock`; active tab wrapped in an accent-soft pill, badges
   float over the icon); Settings lives in the `AuthMenu` profile menu. (Design was iterated by
   rendering real components via a throwaway unguarded route + headless-Chrome screenshots — see the
-  `verify-ui-visually` session memory.)
-- **Theming via `next-themes`.** `app/layout.tsx` wraps the app in next-themes'
-  `ThemeProvider` (`attribute="class"`, `defaultTheme="system"`, `enableSystem`), so it toggles
-  the `.dark` class on `<html>` and injects a pre-paint script (no FOUC); `<html>` carries
-  `suppressHydrationWarning`. `theme-button.tsx` (a cycling system → light → dark `IconButton`,
-  via `utils/theme.ts` `asThemeChoice`/`nextThemeChoice`/`themeLabel`) sits beside the avatar in
+  `verify-ui-visually` session memory.) Icons are Lucide, compiled in by `unplugin-icons`
+  (`~icons/lucide/…`) from `@iconify-json/lucide`.
+- **Theming is a class on `<html>`, set before first paint.** The first inline script in
+  `src/app.html` reads the stored choice (`localStorage` key `theme`: system, light or dark) and sets
+  `light` or `dark` on `<html>` before anything is drawn (no FOUC). `src/lib/theme.svelte.ts` is its
+  other half: `startTheme()`, run from an effect in `src/routes/+layout.svelte`, reads the same key
+  into `theme` (`choice`, `resolved`, `set()`) and follows the system preference and other tabs from
+  then on. `theme-button.svelte` (a cycling system → light → dark `IconButton`,
+  via `src/lib/theme.ts` `asThemeChoice`/`nextThemeChoice`/`themeLabel`) sits beside the avatar in
   BOTH app headers (mobile and the desktop `TopBar`) as well as on the sign-in screen and the
   public portal header. Settings keeps the Appearance `Segmented` (System/Light/Dark) too — the
-  toggle is the quick reach, the segmented control is where you go to be deliberate. Each is guarded by a `mounted` flag.
-- **Terra identity.** One typeface — **Plus Jakarta Sans** (loaded via `next/font/google` in
-  `app/layout.tsx` as `--font-jakarta`, wired to `--font-sans`, self-hosted into the static export)
+  toggle is the quick reach, the segmented control is where you go to be deliberate. `theme.choice` reads
+  "system" until `startTheme` has run, so the first client render agrees with the prerendered HTML.
+- **Terra identity.** One typeface — **Plus Jakarta Sans** (`@fontsource-variable/plus-jakarta-sans`,
+  imported in `src/app.css` and wired to `--font-sans`, self-hosted into the static export)
   — for body AND headings; headings just heavier + tighter (`font-extrabold tracking-[-0.03em]`;
   `.font-heading` is repointed to that, not a serif). Base font size **16px**; quiet section labels
   are `text-sm font-semibold text-muted`; dates/counters use `tabular-nums`. The brand lockup is
-  `components/wordmark.tsx` — a gradient disc holding a white "k" beside "kip" extrabold — used in
-  the mobile top bar (Home), the desktop top bar, sign-in and portal; its `Mark` export is the same
-  disc alone, pulsing, on the splash and the share-link page's loading state.
+  `src/lib/components/wordmark.svelte` — a gradient disc holding a white "k" beside "kip" extrabold — used in
+  the mobile top bar (Home), the desktop top bar, sign-in and portal; `mark.svelte` is the same
+  disc alone, pulsing, on the splash and the share-link page's loading state. Next in the font stack
+  is a `@font-face` of local Arial scaled to Plus Jakarta Sans's metrics (`src/app.css`): it stands in
+  until the real file arrives, so the swap doesn't move the page, and it draws the characters the
+  font has no glyph for — the arrow in "→" links.
 
   **Every mark is a circle, and the classes now say so.** They always rendered as circles — Terra's
   radii exceed half of a box this small and CSS clamps border-radius there, so `rounded-xl` on an
@@ -1247,35 +1260,50 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   only where it earns attention (CTAs, rings, Instant, badges); elevation comes from layered soft
   shadows in light and tonal lightening in dark. Chrome is borderless canvas: a **mobile top bar**
   (back + screen title or wordmark + `AuthMenu`) and, on `≥md`, a **sticky desktop top app bar**
-  (`TopBar` in `nav.tsx` — wordmark + inline nav pills + avatar) that **replaces the old left
+  (`top-bar.svelte` — wordmark + inline nav pills + avatar) that **replaces the old left
   sidebar**; content sits in a `max-w-6xl` centered container. Direction: Airbnb-grade structure,
   but a friends-first, less commercial feel — distinct from a marketplace.
-- **In-app dialogs, no browser `confirm`/`alert`.** `components/dialog.tsx` provides
-  `DialogProvider` + `useDialog()` returning async `confirm()` / `alert()` (mounted in
-  `layout.tsx` around the app). The async API mirrors a native action sheet/dialog, and the UI is
+- **In-app dialogs, no browser `confirm`/`alert`.** `src/lib/components/dialog.svelte` exports
+  `dialog`, whose async `confirm()` / `alert()` can be called from anywhere, and draws whichever is
+  open (`<Dialog />`, mounted once in `src/routes/(app)/+layout.svelte`). The async API mirrors a
+  native action sheet/dialog, and the UI is
   a **bottom sheet on mobile, centered card on desktop**. All destructive actions (delete
   listing, unfriend, cancel slot) route through it; nothing calls `window.confirm`/`alert`. Enter
   confirms only when focus is NOT on a control, since a focused button answers Enter itself —
   otherwise Enter on a focused Cancel would confirm. **A failed action is always said, never only
-  logged**: `useAction` runs a fire-and-forget action and turns its rejection into a "That didn't
-  work" dialog, and `useFailure` does the same for handlers that hold their own busy state.
+  logged**: `runAction` runs a fire-and-forget action and turns its rejection into a "That didn't
+  work" dialog, and `reportFailure` does the same for handlers that hold their own busy state.
 
-  `app/error.tsx` is the render-crash boundary: "This page couldn't load", with Reload and a Home
-  link that is a full page load, because the app is one route and a router push to it from inside
-  it would leave the boundary standing. Next's own fallback would link to `/`, which under a base
-  path is outside kip altogether.
+  `src/routes/+error.svelte` is the render-crash boundary: "This page couldn't load", with Reload and a Home
+  link that is a full page load, because the app is one route and a router navigation to it from
+  inside it would leave the boundary standing. The link is built from `BASE_PATH`, since a bare `/`
+  under a base path is outside kip altogether. The same page is exported as `404.html`, which GitHub
+  Pages serves for a path that names no file; there it says the page could not be found.
 - **Every screen has a URL, in the fragment.** `#/`, `#/browse`, `#/person/<uid>`,
   `#/room/<id>`, `#/room/<id>/slot/<windowId>`, `#/room/<id>/edit`, `#/new-place`,
-  `#/booking/<id>` — `screenHash`/`screenForHash` in `utils/store.tsx` are an inverse pair and the
+  `#/booking/<id>` — `screenHash`/`screenForHash` in `src/lib/screens.ts` are an inverse pair and the
   round trip is lossless for every variant of the `Screen` union. `navigate` pushes a real history
-  entry, `replace` replaces it, `back` calls `history.back()`, and `popstate` only ever calls
-  `setStack` — never a history write, which is what stops the double-entry echo. The fragment names
+  entry, `replace` replaces it, and `back` calls `history.back()`. **Every history write goes through
+  SvelteKit's `goto(hash, { shallow, replace, state })`, never `history.pushState`**, because Kit's
+  router owns history: it numbers every entry, and one written behind its back shares a number with
+  its neighbor, which the router then refuses to traverse between. The stack, a depth and an entry id
+  ride in `page.state` (`kipStack`, `kipDepth`, `kipEntry`), which is also what hands the stack back
+  after a reload. **A traversal is adopted from `page.state`**: `popstate` only raises a flag, the
+  router delivers the state of the entry it landed on, and an effect copies the stack out of it —
+  never a history write, which is what stops the double-entry echo. Scroll offsets live in
+  `sessionStorage` keyed by entry id (`historyScroll`/`rememberScroll`), which survives a reload and
+  a forward; the listener that records them attaches when `<main>` appears, which is only once the
+  gates have opened. The fragment names
   the TOP screen only; the stack beneath it is the app's own memory, so a pasted link is seeded as
-  `[home, entity]` and `back` at depth 0 replaces in place rather than leaving the site. An
+  `[home, entity]` and `back` at depth 0 replaces in place rather than leaving the site. **A fragment
+  typed into the address bar reloads the page**: the browser has already pushed an entry Kit never
+  numbered, so the page is loaded again on it and it becomes an ordinary arrival — with the depth
+  carried across in session storage, so Back still returns to the screen it was typed over. An
   unparseable fragment resolves to Home and is rewritten, so a bad link never renders nothing.
   Ids in the URL are fine: every one is enforced by `firestore.rules`, and the only capability-
   bearing ids are portal tokens — which live on `/portal/`, whose fragment means something else
-  entirely and which every history write skips by pathname — as does `/continue/`, whose fragment
+  entirely. The store routes only on `/` (`routable()` compares the route id), so it never writes
+  history there — nor on `/continue/`, whose fragment
   carries the half of a sign-in link that kip adds.
 - **Object-model navigation (client SPA).** The domain is four entities — Person, Room (listing),
   Slot (window), Booking — and the app is a client-side nav stack in the store (`Screen` =
@@ -1285,14 +1313,14 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   everything else transient (filters, the slot editor, add-slot, confirms) is a `Sheet` with
   component-local state, deliberately NOT in the stack. Each entity has a compact card/row for
   lists AND a full page; both are **state-aware** (affordances from viewer-role × state), e.g.
-  `SlotRow` shows book/request/pending/booked-by-you. `page.tsx` renders the current screen inside
+  `SlotRow` shows book/request/pending/booked-by-you. `src/routes/(app)/+page.svelte` renders the current screen inside
   the `max-w-6xl` container; the mobile top bar carries the back button + the screen title (the
   wordmark only on Home) + the `AuthMenu`, and on `≥md` a back row sits above the content (the
   desktop nav is the top app bar). Detail/list screens own their desktop layouts — Home and RoomPage
-  are 2-col with a right rail / sticky panel, Browse is a card grid, the rest a centered column. The **RoomPage is the single place surface**: owner view (details + an Availability
-  grouped list whose rows open a per-slot `Sheet`, a Sharing section, a Guests list, Edit-details →
+  are 2-col with a right rail / sticky panel, Browse is a card grid, the rest a centered column. The **RoomPage is the single place surface**: owner view (`room-owner-view.svelte`: details + an Availability
+  grouped list whose rows open a per-slot `Sheet`, `slot-sheet.svelte`, a Sharing section, a Guests list, Edit-details →
   `listing-form`, and a quiet Delete) absorbs the old ManageListing + AvailabilityEditor; friend
-  view is host-block + an Open-dates list of bookable `SlotRow`s. Browse/Home/Person list results as
+  view (`room-friend-view.svelte`) is host-block + an Open-dates list of bookable `SlotRow`s. Browse/Home/Person list results as
   the compact **`PlaceCard`** (host featured on top → `PersonPage`, except `showHost={false}` on the
   host's own page; the whole card taps to the room, no slot rows/buttons inside) — the old
   `RoomCard`/`ListingCard` are retired. Browse's filters live in the store's `criteria` (so they
@@ -1321,12 +1349,12 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   is for: a diagnostic is written BY a failure and is worth having from the anonymous visitor it
   happened to, while this is prose somebody sits down and reads. What that costs is the visitor best
   placed to report a broken share link, which is the trade the credential gate makes everywhere.
-  `credentialed` (`utils/feedback.ts`) mirrors the rule so the menu row can hide rather than be
+  `credentialed` (`src/lib/feedback.ts`) mirrors the rule so the menu row can hide rather than be
   offered and then denied; `tests/feedback.test.ts` pins the copy, since the two disagreeing shows
   up as a missing control or an unexplained refusal and neither says which half is wrong.
 
   **Its author never reads it back** — a report is written, not held — and the operator reads them
-  in the app, on a `feedback` screen reached from the menu (`components/feedback-view.tsx`, one more
+  in the app, on a `feedback` screen reached from the menu (`src/lib/components/feedback-view.svelte`, one more
   `View`, so it gets `#/feedback` for free). Fetched rather than watched: nothing writes while it is
   open except the operator's own deletes, which are applied locally. Nothing edits one; the only
   thing to do with a report that has been dealt with is remove it — with no confirm, deliberately,
@@ -1397,15 +1425,17 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
 - **Failures that throw nothing report themselves, to a collection nobody can read.** The failures
   worth diagnosing here are silences — a wait that ended, a listener that went quiet — so there is no
   exception and a stack trace would be empty. What matters is the STATE that made the decision, which
-  is why `debug` carries a `detail` JSON blob (`utils/debug.ts`, `recordDebugEvent` + `clientState`)
+  is why `debug` carries a `detail` JSON blob (`src/lib/debug.ts`, `recordDebugEvent` + `clientState`)
   rather than an error. Three sites write one: the portal ask when it is refused or stalls, the store
   when the re-attach budget runs out, and the profile gate when it turns unreachable. The latter two
   fire once per incident rather than once per retry, since the retries behind them are automatic and
   say nothing new. A portal ask is a person tapping, so every attempt is its own event.
 
-  **The guard vector is snapshotted during render, not read in the effect.** A timer fires up to ten
-  seconds after it armed, and reporting the state the effect closed over would describe the moment
-  the visitor tapped rather than the moment it failed.
+  **The guard vector is read when the report is made, not when the wait began.** A timer fires up to
+  ten seconds after it armed, and reporting the state captured then would describe the moment
+  the visitor tapped rather than the moment it failed. `report()` on the portal page reads every
+  field as it is called, and untracked, since one caller is an effect that must not re-run on what
+  is only being reported.
 
   **It is client-writable and nobody can read it back, which is exactly what separates it from the
   `mail` collection this schema refused.** No recipient, no delivery, nothing to read — so it can't
@@ -1474,7 +1504,7 @@ friends", PersonPage gates on `!friend`, and the portal page on its `Connect` st
 not, and is how this case was found), but the rules don't forbid the write and the trigger can't
 assume the client behaved.
 
-**A connect control has three states and a fourth for "not yet".** `Connect` (`app/portal/page.tsx`)
+**A connect control has three states and a fourth for "not yet".** `Connect` (`src/routes/(app)/portal/ask.ts`)
 is `ask` | `sent` | `none` | `unknown`, and the control reports whichever it's in WHERE IT STANDS —
 a `pending` Chip reading "Friend request sent" in the button's own place, the same swap a slot row
 makes between Request and its Requested chip. It used to vanish instead, with a paragraph further
@@ -1521,7 +1551,7 @@ account would otherwise just silently receive nothing.
 **Per-event preferences** live at `users/{uid}/settings/prefs.notify`, surfaced as a Notifications
 section in Settings. Owner-private, but the sender runs as admin so it reads them regardless.
 
-**Every event is defined once**, in `NOTIFY_EVENTS` (`utils/types.ts`): label, description, and its
+**Every event is defined once**, in `NOTIFY_EVENTS` (`src/lib/types.ts`): label, description, and its
 own default. The `NotifyPrefs` type, `DEFAULT_NOTIFY` and the Settings rows all derive from it, so
 adding an event is a single edit and the three can't drift. (The function keeps its own copy of the
 KEYS, being a separate package — they must stay in step, since a key that exists on only one side
@@ -1620,9 +1650,11 @@ on that job.
 
 ## About, Privacy, Terms and Help
 
-Four **statically exported routes** — `/about/`, `/privacy/`, `/terms/`, `/help/` — each a plain server
-component importing no store, initialising no Firebase and needing no session, so the full text sits
-in the exported HTML for `curl` with JavaScript off.
+Four **statically exported routes** — `/about/`, `/privacy/`, `/terms/`, `/help/`, under
+`src/routes/(docs)/` — each a prerendered page importing no store, initialising no Firebase and
+needing no session, so the full text sits
+in the exported HTML for `curl` with JavaScript off. That is structural: the store, the dialogs and
+the identity sheet are started by `src/routes/(app)/+layout.svelte`, which these routes sit outside.
 
 **They cannot be fragment screens, and that is not a preference.** Twilio fetches the Privacy and
 Terms URLs **server-side** during campaign registration, and a fragment never reaches the server —
@@ -1630,19 +1662,21 @@ Terms URLs **server-side** during campaign registration, and a fragment never re
 the required language. It would pass the URL check and fail the content review, which is the worst
 shape of failure: the thing looks configured and isn't. `web/tests` cannot catch this; the check is
 grepping `web/out/privacy/index.html` for the non-sharing sentence after `bun export`.
+`src/hooks.server.ts` is what lets a whole sentence match: it turns each line break the source was
+wrapped at into the one space it renders as, while prerendering.
 
 Neither are they BOTH — a fragment screen beside a static route is two copies of legal text that
 will drift. One canonical URL each, and `screenForHash` already resolves an unknown fragment to
 Home, so a stray `#/privacy` link degrades rather than breaking.
 
-`components/doc-page.tsx` is the shell and about a dozen element classes; deliberately not
+`src/lib/components/doc-page.svelte` is the shell, with `doc-h2`, `doc-p`, `doc-list` and `doc-card` beside it; deliberately not
 `@tailwindcss/typography`, which would be a dependency to keep the tokens exact for four pages.
 Body text sits on the **warm canvas, not in cards** — a card in kip means a control or a list, and a
 wall of card behind two thousand words reads as a form. **Exactly two cards exist** and both earn
 it: Privacy's "short version", which is the honesty gesture, and Terms' "Text messaging program",
 which makes the required SMS disclosures impossible for a reviewer to miss.
 
-`utils/contact.ts` holds the contact address as one constant: `support@kip.hafa.cc`, which
+`src/lib/contact.ts` holds the contact address as one constant: `support@kip.hafa.cc`, which
 Cloudflare Email Routing forwards to the `kip-app@googlegroups.com` Google Group. It is deliberately
 NOT the sending address, which nobody reads. Two group settings are load-bearing, since forwarded
 mail still arrives under the stranger's own address: **posting open to anyone on the web**, or every message from a stranger
@@ -1677,7 +1711,7 @@ stored SMS consent record references documents, and until now those links resolv
 ## Photos
 
 A listing carries up to `MAX_PHOTOS` (8) entries in `photos`, each `{ id, url }`; the objects live
-in Storage at `listings/{ownerId}/{listingId}/{photoId}`. `utils/photos.ts` owns the round trip.
+in Storage at `listings/{ownerId}/{listingId}/{photoId}`. `src/lib/photos.ts` owns the round trip.
 `uploadListingPhoto` **shrinks in the browser first** (canvas, 1600px max edge, JPEG q0.82), which
 keeps the bucket small and, deliberately, re-encodes away EXIF: a GPS tag on a photo of someone's
 home should not ride along with a share link.
@@ -1687,12 +1721,12 @@ of the function rather than an edge case. A canvas with no 2d context, and a sou
 `toBlob` won't take, each used to fall back to the original file — so the two paths that delivered
 an untouched photo were exactly the two that delivered its GPS tag, silently, while the privacy
 page said otherwise. A refused upload is the lesser harm, and it says so in its own words: the two
-callers (`photo-strip.tsx`, `person-page.tsx`) tell a `PhotoEncodeError` from a network failure,
+callers (`photo-strip.svelte`, `profile-photo.svelte`) tell a `PhotoEncodeError` from a network failure,
 because nothing about this one gets better on a retry. Proved in `check:exif`, below.
 
-It then mints the download URL once, at upload, and returns it to be stored. `components/photo-strip.tsx` is the editable strip (owner view of RoomPage
+It then mints the download URL once, at upload, and returns it to be stored. `src/lib/components/photo-strip.svelte` is the editable strip (owner view of RoomPage
 and the listing form; drag or the per-thumbnail arrows reorder, and the first photo is the cover),
-`components/cover-photo.tsx` the read-only cover used by `PlaceCard`, the RoomPage hero and the
+`src/lib/components/cover-photo.svelte` the read-only cover used by `PlaceCard` and, through `photo-gallery.svelte`, the RoomPage hero and the
 portal page.
 
 **A new place can carry photos, because its id is minted before it is written.** `newListingId()`
@@ -1739,20 +1773,21 @@ listing could name a slot's token; nothing starts from there any more.
 
 ## Installing it
 
-**The worker is TypeScript**, compiled from `sw/sw.ts` to a gitignored `public/sw.js` — the source
-sits outside `public/` so none of it is served. `tsconfig.sw.json` is its own because a worker has no
+**The worker is TypeScript**, compiled from `sw/sw.ts` to a gitignored `static/sw.js`, served at
+`/sw.js` — the source
+sits outside `static/` so none of it is served. `tsconfig.sw.json` is its own because a worker has no
 DOM, and `lib: ["dom"]` would type `self` as a Window and accept code that throws the moment it runs.
-**`next.config.js` runs that compile**, because it is the one file every Next command loads: wired
-into `dev`/`export` instead, a bare `next build` shipped a site whose `sw.js` 404s with nothing
-saying so. It resolves `tsc` from its own directory, not the working one, which Next does not set —
-`next build web` from the repo root died with ENOENT before Next printed anything. `build:sw` is the
+**`vite.config.ts` runs that compile**, because it is the one file every Vite command loads: wired
+into `dev`/`export` instead, a bare `vite build` would ship a site whose `sw.js` 404s with nothing
+saying so. It resolves `tsc` from its own directory, not the working one, which a caller is free to
+set to anything. `build:sw` is the
 same compile by hand, for when only the worker has changed.
 
 **Nothing with a query or a fragment on it is ever stored.** A navigation's `request.url` carries
 both — measured, not assumed, and two reviews of this disagreed about it — so caching the request as
 it arrives writes a portal capability and a one-time sign-in code into Cache Storage, which has no
 expiry, is readable by any same-origin script, and outlives the revocation meant to kill them. The
-key is the PATH alone, forced to a trailing slash to match `trailingSlash: true` — and the response
+key is the PATH alone, forced to a trailing slash to match `trailingSlash = "always"` — and the response
 is stored as a fresh `Response` with no URL on it, since a cloned response carries the URL it came
 from, query and all, into Cache Storage. `check:pwa` opens `/portal/#token` and
 `/continue/?oobCode=…` and asserts neither reaches a cache key.
@@ -1768,24 +1803,26 @@ mints new hashed names and nothing invalidates the old ones.
 that deletes its caches — or unregisters itself — is the only remote lever there will ever be. Worth
 knowing before it is needed.
 
-`app/manifest.ts` plus the compiled worker make kip installable, and `Pwa` (mounted in the layout)
+`src/routes/manifest.webmanifest/+server.ts` (prerendered to a file) plus the compiled worker make
+kip installable, and `Pwa` (mounted in the root layout)
 registers the worker after load. Nothing is prefixed for us, so `start_url`, `scope` and every icon
-path read `NEXT_PUBLIC_BASE_PATH` themselves. The release no longer sets it — kip is served at the
+path read `VITE_BASE_PATH` themselves, through `BASE_PATH` in `src/lib/base.ts`. The release no longer sets it — kip is served at the
 root of `kip.hafa.cc` — but the support stays, so building under a path is still one env var; `scope` covers the whole app so a share link opens
-inside an installed kip rather than bouncing to a tab. Icons are rendered from `app/icon.svg`, with
+inside an installed kip rather than bouncing to a tab. Icons are rendered from `static/icon.svg`, with
 a separate full-bleed maskable one because Android crops the disc otherwise.
 
 **The worker caches the SHELL and nothing else.** Firestore already persists to IndexedDB and
 queues writes until it can reach the server, so the only thing between kip and working offline was
-the HTML and JS needed to start it. Content-hashed `/_next/static/**` is cache-first; documents are
+the HTML and JS needed to start it. Content-hashed `/_app/immutable/**` is cache-first; documents are
 network-first so a deploy lands immediately and a cache miss only matters with no signal.
 Cross-origin requests are never touched — a worker in front of the SDK's own offline machinery
-could only get in its way. It does not register in dev, where `next dev` serves modules a stale
+could only get in its way. It does not register in dev, where the dev server serves modules a stale
 cache would hand back.
 
-**Installing is only ever a deliberate tap.** `utils/install.ts` holds Chrome's `beforeinstallprompt`
+**Installing is only ever a deliberate tap.** `src/lib/install.svelte.ts` holds Chrome's `beforeinstallprompt`
 rather than letting it through, so Chrome never puts up its own banner and the only way in is the
-menu row. That row lives in `AuthMenu`, which `/portal/` and `/continue/` do not render — so a
+menu row. Chrome can fire that event before the module has loaded and does not replay it, so the
+inline script in `src/app.html` catches it first and leaves it on `window` for the module to pick up. That row lives in `AuthMenu`, which `/portal/` and `/continue/` do not render — so a
 share-link visitor is never offered an install, which is right: they have not joined anything yet.
 Safari fires no such event at all, so on an iPhone the row explains Share → Add to Home Screen
 instead of offering a button that cannot work, and iPads are found by their Macintosh user agent
@@ -1800,7 +1837,9 @@ reaches a cache key, and then **kills the server** and checks kip still renders.
 matters: the first version emulated offline through CDP, which does not apply to the fetches a
 service worker makes, so it watched the shell render over the live network and credited the cache.
 It passed with the entire offline fallback deleted. It does not cover a signed-in kip offline: that
-is Firestore's persistence, which needs a real session.
+is Firestore's persistence, which needs a real session. Its static server listens with a backlog of
+128, because the build boots by fetching some thirty small modules at once and the default queue of
+5 reset the connections that didn't fit.
 
 The export it builds talks to the REAL project, so the check fails every Firebase Auth request in
 the browser and asserts the share link's anonymous sign-up was attempted and blocked: without that,
@@ -1808,10 +1847,21 @@ every run left an account in production.
 
 ## Web build
 
+The client is SvelteKit 3 on Svelte 5 (runes enforced) and Vite 8, exported by `adapter-static`.
 `cd web && bun install`, and `cd functions && npm install` once (a separate package on the Node
-runtime). `bun lint` is the gate and covers all THREE: `tsc` for the site, `tsc -p tsconfig.sw.json`
-for the service worker, `biome check`, then `tsc --noEmit -p ../functions`. `bun dev` for local dev. `bun export` runs `next build` → static
-site in `web/out/`.
+runtime). `bun lint` is the gate and covers all THREE: `svelte-kit sync` then
+`svelte-check --fail-on-warnings` for the site, `tsc -p tsconfig.sw.json`
+for the service worker, `biome check`, then `tsc --noEmit -p ../functions`. `bun dev` for local dev. `bun export` runs `vite build` → static
+site in `web/out/`, with a `404.html` for GitHub Pages.
+
+All of Kit's config is in `vite.config.ts` — Kit 3 has no `svelte.config.js` — beside the Tailwind
+and icon plugins and the worker compile (see *Installing it*). There is no `$lib` either: the alias
+is `#lib/*`, declared in `package.json`'s `imports`, and it needs the full file extension
+(`#lib/store.svelte.ts`). Every route is prerendered with a trailing slash (`src/routes/+layout.ts`),
+so anything that runs while a component initializes also runs at build with no `window`; browser
+work goes in an effect or `onMount`. `src/hooks.server.ts` runs in dev and while prerendering only —
+the release has no server — and besides unwrapping line breaks it preloads the Latin font file.
+TypeScript is held at `~6.0.3`, because TypeScript 7 breaks `svelte-kit sync` and `svelte-check`.
 
 ## Cloud Functions
 
@@ -1854,13 +1904,17 @@ says so on screen for exactly this reason; the symptom is otherwise indistinguis
 the portal. (Its string is present in a production bundle but unreachable: `usingEmulators()` folds
 to false there, so the badge cannot render.)
 
-`utils/firebase.ts` reads that flag and points BOTH auth and Firestore at the emulators — both or
+`src/lib/firebase.ts` reads that flag and points BOTH auth and Firestore at the emulators — both or
 neither, since an emulator-issued token is scoped to the emulator's project and would be refused by
-the real database. The condition is ANDed with `NODE_ENV !== "production"`, and that half is what
-keeps it out of a shipped bundle: a `NEXT_PUBLIC_*` flag alone compiles to a runtime read, so the
+the real database. The flag is `VITE_AUTH_EMULATOR`, and the condition ANDs it with
+`import.meta.env.DEV`; that half is what
+keeps it out of a shipped bundle: the flag alone is replaced with whatever the build's environment
+held, so the
 emulator's address travels into the build and only an env var stands between production and
-localhost auth. With NODE_ENV in the condition the whole thing folds to a constant and the branch
-is eliminated — verified by grepping the export, not assumed.
+localhost auth. Vite replaces `DEV` with a literal `false` in a build, so the whole thing folds to a
+constant and the branch
+is eliminated — verified by grepping the export, not assumed. The pair is written out at each site
+rather than read through `usingEmulators()`, so the fold doesn't depend on a function being inlined.
 
 What this is for, and what it caught: the phone path's whole point is that linking preserves the
 uid, and the only way to see that is to count the accounts afterwards. One account with the number
@@ -1888,11 +1942,11 @@ cd web && bun run dev:emulated      # one shell, serves on 3001
 bun run check:portal                # another
 ```
 
-It serves on **3001**, not Next's default, so an emulated server can never quietly answer for the
+It serves on **3001**, with `--strictPort`, so an emulated server can never quietly answer for the
 ordinary `bun dev` on 3000 — the two would be indistinguishable in a browser and the emulated one
 has an empty database. Both the script and the check are pinned to it; `KIP_ORIGIN` still overrides.
 
-Run it after touching the portal page, the identity sheet, or `utils/auth.ts`. Everything this path
+Run it after touching the portal page, the identity sheet, or `src/lib/auth.ts`. Everything this path
 has broken — a link that resolved for nobody, a code step that swallowed a wrong code, a returning
 door that never signed anyone in — passed lint, the unit suite and the rules suite while broken,
 because none of those can open a page.
@@ -1916,7 +1970,7 @@ next page load — and a fixture seeded against it belongs to nobody, which rend
 will not load. Ask the emulator instead: `POST
 /identitytoolkit.googleapis.com/v1/projects/demo-kip/accounts:query`.
 
-**And attach to the browser's exceptions from OUTSIDE the page.** `app/error.tsx` catches a render
+**And attach to the browser's exceptions from OUTSIDE the page.** `src/routes/+error.svelte` catches a render
 throw and paints "This page couldn't load" over it, so an in-page `console.error` hook installed
 after navigation sees nothing — the stack survives only in CDP's own `Runtime.exceptionThrown` and
 `Runtime.consoleAPICalled` events. Both checks now collect those and print them before their
@@ -1948,7 +2002,7 @@ component state and a room page that has forgotten which slot was open is where 
 otherwise.
 
 One thing it caught immediately, worth keeping: **a listing with no `location` crashes the room page
-outright** (`DetailBlock` reads `listing.location.label`). Unreachable in production — every write
+outright** (`room-detail.svelte` reads `listing.location.label`). Unreachable in production — every write
 path sets one — so this is a note about FIXTURES, not a bug: seed the field, or spend the time
 reading a stack trace for a state that cannot exist.
 
@@ -2060,7 +2114,7 @@ reachable with no sender, and a check that quietly skips a disabled feature is h
 removed by accident — so the run asserts that the switch is off, refuses the press, writes no
 consent when pressed anyway, says why on the row rather than sitting greyed out saying nothing, and
 still lists the kinds a text cannot carry. Provision a number and the five states run as written.
-It reads the constant out of `utils/sms.ts` rather than being told, so the two cannot disagree.
+It reads the constant out of `src/lib/sms.ts` rather than being told, so the two cannot disagree.
 
 It also pins that **a full code submits itself** — `check:consent` is the only check that types
 one. The code goes in and nothing is clicked; the assertion is that the sheet has gone anyway.
@@ -2143,9 +2197,8 @@ If port 8080 is already held by another project's emulator, switch both `firebas
    only because email-link sign-in rides on that provider; kip asks for no password anywhere.
 3. **Firestore Database →** create (production mode).
 4. **Project settings → Your apps → Web →** register an app; copy the config object into the
-   `firebaseConfig` in `web/utils/firebase.ts` (replacing the shipped `hafaio-kip-dev` dev
-   config). A blank `appId` makes `firebaseConfigured()` false and disables sign-in — the
-   unconfigured fallback — so keep a real `appId` for a working build.
+   `firebaseConfig` in `web/src/lib/firebase.ts` (replacing the shipped `hafaio-kip-dev` dev
+   config).
 5. **Blaze plan** — required for Cloud Functions (notification email, leaving, the reaper, the text check). Set a
    Cloud Billing budget alert while you're there.
 6. **Auth providers, and the one switch that must stay off.** Authentication → Sign-in method:
@@ -2196,7 +2249,7 @@ that and nothing in the repo does it. **An origin of its own, not a path under `
 (Firestore's offline cache and the auth session) and service-worker scope with every other project
 under `hafa.cc`, any of whose scripts could read kip's.
 
-`auth.kip.hafa.cc` exists because it is the app's `authDomain` (`utils/firebase.ts`): the Google
+`auth.kip.hafa.cc` exists because it is the app's `authDomain` (`src/lib/firebase.ts`): the Google
 sign-in popup opens Firebase's reserved `/__/auth/*` pages on it, so the consent screen names kip's
 domain instead of a `firebaseapp.com` one. **Nothing is deployed to Firebase Hosting**, and there is
 no `hosting` block in `firebase.json`: Firebase serves its reserved `/__/*` pages on a connected
@@ -2264,7 +2317,7 @@ a booking it already cancelled and tells the other party their stay was called o
 attempt); and a drift
 check that pins the vocabulary the two packages share but can't import across: the notification
 kinds, the texted subset and both channels' defaults, the two map paths, the sending number, the
-teardown phases in order, and the cancel reasons — an EXACT set match between `utils/types.ts` and
+teardown phases in order, and the cancel reasons — an EXACT set match between `src/lib/types.ts` and
 `messages.ts`, plus a check that every reason `leaving.ts` writes is one the web side knows. It
 matches against source with comments stripped, so a string surviving only in a comment doesn't
 pass. Drift now fails CLOSED at the sender — an unknown kind reads as not wanted (see the SMS
@@ -2288,7 +2341,7 @@ release — see Notifications), and `SITE_ORIGIN` in `functions/src/index.ts` ma
 where Pages actually serves.
 
 **`hafaio-kip-dev` IS production**, despite the name — `.firebaserc` and the config in
-`web/utils/firebase.ts` both point at it, and it carries no fixture data. Standing up a separate
+`web/src/lib/firebase.ts` both point at it, and it carries no fixture data. Standing up a separate
 `hafaio-kip` would mean redoing the whole one-time setup:
 rules, storage, functions, secrets, WIF, authorized domains.
 
@@ -2304,7 +2357,7 @@ lines it returns alongside are deploys, not invocations.
 
 ## Known limitations / next steps
 
-- Geocoding is via OpenStreetMap Nominatim (`utils/geocode.ts`): the listing form takes an
+- Geocoding is via OpenStreetMap Nominatim (`src/lib/geocode.ts`): the listing form takes an
   address and looks up lat/lng/geohash (free, key-less, low-volume). Swap for Google/Mapbox if
   precision/volume demands. No autocomplete yet — it's a single lookup on "Find" or at submit.
 - Friends' listings refresh on demand (`refreshBrowse`), not live. Each fetch takes a ticket and
@@ -2313,17 +2366,17 @@ lines it returns alongside are deploys, not invocations.
 - **Switching accounts without signing out resets every piece of session state.** A texted code or
   credential that already belongs to another account signs INTO it with no sign-out between, so the
   uid changes under a live session and every reset keyed on `!user` is skipped. The store resets
-  during RENDER when the uid changes, not in an effect — an effect would let that render's own
-  effects act for the new uid on the old account's trips and bookings first.
+  inside the auth listener when the uid changes, in the same turn that sets `user` — effects run
+  after it, so none of them can act for the new uid on the old account's trips and bookings first.
 - **A lost listener is re-attached, and giving up is said out loud.** A Firestore snapshot error is
-  TERMINAL — the SDK drops that listener and never retries — so `onSnapshotError` (`utils/firebase.ts`)
+  TERMINAL — the SDK drops that listener and never retries — so `onSnapshotError` (`src/lib/firebase.ts`)
   logging and returning left the screen frozen on its last snapshot, still styled as live. That is
   worse than an error: nothing looks wrong, and a place you just added simply never appears. It now
   also fires `onListenerLost`, and the store re-attaches every owned listener by bumping a
-  `generation` counter that the three subscription effects depend on.
+  `generation` counter that the four subscription effects depend on.
 
-  **The decision of WHEN to re-attach is a pure function** (`utils/reattach.ts`, `decideReattach`),
-  split out for the same reason `messages.ts` is: the effect around it needs React, Firebase and a
+  **The decision of WHEN to re-attach is a pure function** (`src/lib/reattach.ts`, `decideReattach`),
+  split out for the same reason `messages.ts` is: the effect around it needs Svelte, Firebase and a
   clock to exercise, the decision needs none of them, and `tests/reattach.test.ts` pins it. Backoff
   is `REATTACH_DELAYS` (500ms / 2s / 6s) and the burst is **debounced to one re-attach** — the owned
   listeners all die together whenever the token is what's refused, so nine losses must buy one retry,
@@ -2343,7 +2396,7 @@ lines it returns alongside are deploys, not invocations.
   at once, and since a live timer IS the burst guard, leaving one armed would swallow the new
   session's first real loss.
 
-  **A re-attach must not reset `profileReady`** — nor `deletionReady`, which follows the same rule. `page.tsx` renders a full-screen splash whenever
+  **A re-attach must not reset `profileReady`** — nor `deletionReady`, which follows the same rule. `+page.svelte` renders a full-screen splash whenever
   that is false, so resetting it mid-session blanks the whole app — unmounting an open sheet and any
   half-typed form — which is the exact opposite of the invisible repair this mechanism exists to be.
   Which session an opening belongs to is now `gateStep`'s job (see the store bullet) — it reopens
@@ -2577,8 +2630,7 @@ lines it returns alongside are deploys, not invocations.
   nothing takes today and which is what an email-only kind will render as when one arrives.
 
   **The whole text section is gated on `SMS_LIVE`**, which is `Boolean(SMS_FROM)` — the same
-  ships-able-to-be-off shape as `smsConfigured()` on the sender and `firebaseConfigured()` on the
-  client. kip has no number, so nothing can be sent, and a switch that records a TCPA consent for
+  ships-able-to-be-off shape as `smsConfigured()` on the sender. kip has no number, so nothing can be sent, and a switch that records a TCPA consent for
   texts that cannot be delivered is a promise the product cannot keep. It gates three things, not
   one: the master switch (`disabled`, with copy naming the reason rather than sitting greyed out
   saying nothing), `texting` itself (or an account that agreed BEFORE kip lost its number renders
@@ -2592,7 +2644,7 @@ lines it returns alongside are deploys, not invocations.
 
   **TCPA consent is collected on that switch, NOT on the sheet's number field** — the reverse of what this
   note used to say, and the reason matters: consent to marketing-adjacent automated texts must be
-  UNBUNDLED from anything else. The number in `reach-field.tsx` is collected to sign in, so attaching
+  UNBUNDLED from anything else. The number in `reach-field.svelte` is collected to sign in, so attaching
   notification consent there bundles it with account creation, which is the specific pattern the rule
   forbids, and loads friction onto the one screen — a stranger on a share link — the whole design
   exists to keep frictionless. The switch carries the four required disclosures (automated texts,
@@ -2609,7 +2661,7 @@ lines it returns alongside are deploys, not invocations.
   field existed), and removing the phone door stops the texts, so re-adding the same one asks
   again — taking a number off the account is the plainest way there is of saying stop texting me.
   The sender's check is pinned by `tests/drift.test.ts`, since nothing else can see it.
-  `reach-field.tsx` carries one line for it: the code step appends "Standard message rates apply."
+  `reach-field.svelte` carries one line for it: the code step appends "Standard message rates apply."
 
   **Changing your number re-asks in one tap; it does not transfer anything.** Bound to a number, the
   consent otherwise lapses the moment the number changes — the switch goes off and stays off until
@@ -2690,7 +2742,7 @@ lines it returns alongside are deploys, not invocations.
   **A check that never comes back says so, and the server outlasts the screen.** The trigger's
   answer is the only thing that stops the spinner, so a single failed write left the button disabled
   across reloads until some unrelated setting was changed. Two halves. `probeState`
-  (`utils/sms.ts`, pinned in `tests/sms.test.ts`) derives `idle | checking | stalled | answered` from
+  (`src/lib/sms.ts`, pinned in `tests/sms.test.ts`) derives `idle | checking | stalled | answered` from
   the two stamps and the clock — nothing stored, so a reload can't lose a check in flight — and
   `CHECK_STALL_MS` is 30s rather than the portal ask's 10, because this wait legitimately contains a
   cold start, Twilio's own 10s timeout and a second write. A stall is not terminal: a late answer
@@ -2708,7 +2760,7 @@ lines it returns alongside are deploys, not invocations.
   "still blocked" line could not render at all. That line is the whole reason the check is legible,
   since the note is otherwise identical before and after.
 
-  **The number is in both packages and pinned.** `SMS_FROM` (`utils/sms.ts`) is a second copy of
+  **The number is in both packages and pinned.** `SMS_FROM` (`src/lib/sms.ts`) is a second copy of
   `TWILIO_FROM`, since neither package can import from the other, and `tests/drift.test.ts` pins
   them. Wrong, Settings would tell someone to text START to a phone kip has never sent from — the
   message goes through, nothing changes, and nobody can see why. Both are empty until a number is
@@ -2740,7 +2792,7 @@ lines it returns alongside are deploys, not invocations.
 
   **It ships able to be off, and the credential is never a deploy-time condition.** One gate —
   `smsConfigured()`, the empty `TWILIO_ACCOUNT_SID`/key SID/`TWILIO_FROM` constants — checked before
-  anything is read, written or sent, the same shape as `firebaseConfigured()` on the web side.
+  anything is read, written or sent.
 
   The credential itself is **fetched at first use** from Secret Manager's REST API, with the runtime
   service account's own metadata-server token and cached for the life of the instance. That is a
@@ -2770,7 +2822,7 @@ lines it returns alongside are deploys, not invocations.
   than rejecting — so the consequence is minutes of delay, not lost messages.
 
   **Geography is pinned in three places and they must move together**: `parseDestination`'s US-only
-  refusal, `US_DIGITS` in `utils/destination.ts`, and the Firebase Auth SMS region allowlist (already
+  refusal, `US_DIGITS` in `src/lib/destination.ts`, and the Firebase Auth SMS region allowlist (already
   US-only on the live project). `textIfWanted` ALSO checks the number starts with `+1` before
   spending, since a number can reach an Auth account by routes the web form does not own. 10DLC is US
   carrier policy, so international traffic skips TCR entirely but costs 5–20× per segment and carries
@@ -2788,7 +2840,7 @@ lines it returns alongside are deploys, not invocations.
   trigger**: availability isn't urgent, a host adding a week of dates writes several windows in one
   sitting, and a digest collapses that into one email and one run regardless of write volume.
 
-  **The blocker is duplication, not cost.** `searchListings` lives in `web/utils/search.ts` and the
+  **The blocker is duplication, not cost.** `searchListings` lives in `web/src/lib/search.ts` and the
   two packages can't import across each other — the same reason `NotifyKind` needs a drift test.
   Reimplementing date overlap, type and `distanceBetween` in `functions/` is a far bigger drift
   surface than a handful of string keys, and a divergence is user-visible in the worst way: the

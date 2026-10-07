@@ -17,7 +17,7 @@ const VERSION = "kip-v1";
 // Documents are the opposite — the same URL means something new after every
 // deploy — so those are network first, which is what stops an installed kip
 // opening a build that shipped weeks ago.
-const IMMUTABLE = /\/_next\/static\//;
+const IMMUTABLE = /\/_app\/immutable\//;
 
 worker.addEventListener("install", (event) => {
   // The entry point only — its URL is the scope, where the chunks it pulls in

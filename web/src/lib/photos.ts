@@ -1,0 +1,116 @@
+import {
+  deleteObject,
+  getDownloadURL,
+  ref,
+  uploadBytes,
+} from "firebase/storage";
+import { storage } from "./firebase";
+
+import type { ListingPhoto } from "./types";
+
+export const MAX_PHOTOS = 8;
+
+// Re-encoding also drops EXIF, and a GPS tag on a photo of someone's home is not
+// something to hand out with a share link.
+const MAX_EDGE = 1600;
+const AVATAR_MAX_EDGE = 512;
+const QUALITY = 0.82;
+
+function photoPath(
+  ownerId: string,
+  listingId: string,
+  photoId: string,
+): string {
+  return `listings/${ownerId}/${listingId}/${photoId}`;
+}
+
+// The uid is the name, so replacing one leaves nothing to clean up.
+function avatarPath(uid: string): string {
+  return `avatars/${uid}`;
+}
+
+// Nothing here retries, so the caller can say so instead of blaming the network.
+export class PhotoEncodeError extends Error {}
+
+// Both failures used to fall back to the original file, which shipped whatever
+// EXIF the camera wrote — including the GPS tag on a photo of someone's home,
+// which the privacy page promises is gone. A refused upload is the lesser harm.
+export async function shrink(file: Blob, maxEdge: number): Promise<Blob> {
+  // The THIRD way this fails, and the one that reaches real people: a format the
+  // browser can't decode at all — HEIC straight off an iPhone is the live case.
+  // It throws a bare DOMException, which the callers read as a network problem
+  // and answer with "check your connection and try again", advice that is wrong
+  // about a file that will fail identically for ever.
+  let bitmap: ImageBitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    throw new PhotoEncodeError("this image format can't be read");
+  }
+  const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+  const width = Math.round(bitmap.width * scale);
+  const height = Math.round(bitmap.height * scale);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) throw new PhotoEncodeError("no 2d canvas context");
+  context.drawImage(bitmap, 0, 0, width, height);
+  bitmap.close();
+
+  const blob = await new Promise<Blob | null>((resolve) =>
+    canvas.toBlob(resolve, "image/jpeg", QUALITY),
+  );
+  // Exotic source formats can fail to re-encode.
+  if (!blob) throw new PhotoEncodeError("could not re-encode as JPEG");
+  return blob;
+}
+
+// The URL is minted once, here, because only the owner may ask Storage for it.
+export async function uploadListingPhoto(
+  ownerId: string,
+  listingId: string,
+  file: Blob,
+): Promise<ListingPhoto> {
+  const id = crypto.randomUUID();
+  const object = ref(storage(), photoPath(ownerId, listingId, id));
+  await uploadBytes(object, await shrink(file, MAX_EDGE));
+  return { id, url: await getDownloadURL(object) };
+}
+
+export async function uploadAvatar(uid: string, file: Blob): Promise<string> {
+  const object = ref(storage(), avatarPath(uid));
+  await uploadBytes(object, await shrink(file, AVATAR_MAX_EDGE));
+  return getDownloadURL(object);
+}
+
+export async function deleteAvatar(uid: string): Promise<void> {
+  // Someone wearing only their provider's photo has no object to delete.
+  await deleteObject(ref(storage(), avatarPath(uid))).catch((error) =>
+    console.warn("deleteAvatar", error),
+  );
+}
+
+const AVATAR_HOST = "https://lh3.googleusercontent.com/";
+
+// Rules can't iterate a list, so a listing's photo URLs can't be pinned to an
+// origin server-side — a crafted client could point friends' browsers at a
+// tracking pixel. The renderer is the one at risk, so the check belongs here.
+// Google's host is trusted because a Google account arrives wearing a photo we
+// copy untouched and never mint a URL for.
+export function photoSrc(url: string): string | null {
+  const bucket = `https://firebasestorage.googleapis.com/v0/b/${storage().app.options.storageBucket}/o/`;
+  return url.startsWith(bucket) || url.startsWith(AVATAR_HOST) ? url : null;
+}
+
+export async function deleteListingPhoto(
+  ownerId: string,
+  listingId: string,
+  photoId: string,
+): Promise<void> {
+  // Already gone is the desired end state; the listing drops it either way.
+  await deleteObject(
+    ref(storage(), photoPath(ownerId, listingId, photoId)),
+  ).catch((error) => console.warn("deleteListingPhoto", error));
+}

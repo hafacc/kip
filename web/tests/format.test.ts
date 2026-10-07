@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { endedWithin, STAY_SIGHT_DAYS, todayIso } from "../utils/format";
+import { endedWithin, STAY_SIGHT_DAYS, todayIso } from "../src/lib/format";
 
 describe("todayIso", () => {
   test("is the local calendar date, not UTC", () => {

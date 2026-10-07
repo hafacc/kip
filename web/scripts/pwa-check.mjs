@@ -4,7 +4,7 @@
 //   cd web && bun run check:pwa
 //
 // It builds the export and serves it itself, because both claims are about the
-// PRODUCTION bundle: `next dev` serves modules a cache would hand back stale, so
+// PRODUCTION bundle: the dev server serves modules a cache would hand back stale, so
 // the worker deliberately does not register there and none of this is reachable
 // from the dev server the other checks use. No emulator: the export carries the
 // real project's config, so every request to Firebase Auth is failed in the
@@ -42,7 +42,7 @@ function expect(what, ok, detail = "") {
 function runExport() {
   const done = spawnSync("bun", ["run", "export"], {
     stdio: "inherit",
-    env: { ...process.env, NEXT_PUBLIC_BASE_PATH: BASE },
+    env: { ...process.env, VITE_BASE_PATH: BASE },
   });
   if (done.status !== 0) throw new Error("export failed");
 }
@@ -59,10 +59,19 @@ if (BASE) {
 
 // Serving `out/` rather than pointing at Pages: the worker needs a secure
 // context, and localhost is one.
-const server = spawn("python3", ["-m", "http.server", String(PORT)], {
-  cwd: SERVE,
-  stdio: "ignore",
-});
+//
+// With a listen backlog raised from Python's default of 5: the build boots by
+// fetching some thirty small modules at once, and a queue that short resets
+// whichever connections don't fit — a cold load then fails on a missing chunk
+// about half the time, for a reason that has nothing to do with kip.
+const server = spawn(
+  "python3",
+  [
+    "-c",
+    `import http.server as h; h.ThreadingHTTPServer.request_queue_size = 128; h.test(HandlerClass=h.SimpleHTTPRequestHandler, ServerClass=h.ThreadingHTTPServer, port=${PORT})`,
+  ],
+  { cwd: SERVE, stdio: "ignore" },
+);
 process.on("exit", () => server.kill());
 await new Promise((done) => setTimeout(done, 2500));
 
@@ -267,12 +276,12 @@ expect(
   "the pages are cached, keyed on the path alone",
   keys.some((key) => key.endsWith(`${BASE}/portal/`)) &&
     keys.some((key) => key.endsWith(`${BASE}/continue/`)),
-  keys.filter((key) => !key.includes("/_next/")).join(" "),
+  keys.filter((key) => !key.includes("/_app/")).join(" "),
 );
 
 console.log(
   "  documents held:",
-  keys.filter((key) => !key.includes("/_next/")).join(" ") || "(none)",
+  keys.filter((key) => !key.includes("/_app/")).join(" ") || "(none)",
 );
 
 console.log("\nand it opens with the network pulled");

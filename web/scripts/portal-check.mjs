@@ -5,7 +5,7 @@
 //
 // It cannot gate CI — it wants a browser and a dev server — and that is not a
 // reason to skip it. Run it by hand after touching the portal, the identity
-// sheet, or anything in `utils/auth.ts`:
+// sheet, or anything in `src/lib/auth.ts`:
 //
 //   cd web && bun run dev:emulated        # in one shell (serves on 3001)
 //   bun run check:portal                  # in another
@@ -17,7 +17,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { rm } from "node:fs/promises";
 
-// 3001, not Next's default — Erik's own dev server lives on 3000, and an
+// 3001, not the dev server's default — Erik's own dev server lives on 3000, and an
 // emulated server there would quietly answer for it. `dev:emulated` pins the
 // same port, so the two cannot drift apart.
 const APP = process.env.KIP_ORIGIN ?? "http://localhost:3001";
@@ -142,7 +142,7 @@ async function browser() {
   await new Promise((r) => (ws.onopen = r));
   let id = 0;
   const waiting = new Map();
-  // Page-level events, not an in-page hook: `app/error.tsx` catches a render
+  // Page-level events, not an in-page hook: `+error.svelte` catches a render
   // throw before any hook installed after navigation could see it.
   const thrown = [];
   ws.onmessage = (event) => {
