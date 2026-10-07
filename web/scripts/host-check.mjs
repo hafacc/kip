@@ -11,10 +11,17 @@
 //   cd web && bun run dev:emulated        # in one shell (serves on 3001)
 //   bun run check:host                    # in another
 //
+// It ends on check-out instructions, which need a second person: the host
+// writes them for a place and a room, and a guest in a browser of their own
+// sees them on a confirmed stay and not on one they have only asked for.
+//
 // Exits non-zero on the first failed expectation, so it reads like a test.
+//
+// KIP_SHOTS=<dir> also saves 390px screenshots of the check-out surfaces, light
+// and dark, for looking at.
 
 import { spawn, spawnSync } from "node:child_process";
-import { rm } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 
 const APP = process.env.KIP_ORIGIN ?? "http://localhost:3001";
 const FIRESTORE = "http://127.0.0.1:8080";
@@ -57,22 +64,25 @@ const ts = (timestampValue) => ({ timestampValue });
 const int = (n) => ({ integerValue: String(n) });
 
 const PROFILE = "/tmp/kip-host-check";
+const GUEST_PROFILE = "/tmp/kip-host-check-guest";
+const SHOTS = process.env.KIP_SHOTS;
 
 let chrome;
-async function browser() {
+async function browser(profile = PROFILE, port = 9334) {
   // A browser left behind holds the SIGNED-IN session, so the next run opens on
   // the app rather than the door and fails at step one saying nothing about why.
   // No leading dashes in the pkill pattern: it reads one as an option of its own
   // and matches nothing, which looks just like there being nothing to kill.
-  spawnSync("pkill", ["-f", `user-data-dir=${PROFILE}`]);
+  // The trailing space keeps the host's pattern from matching the guest's.
+  spawnSync("pkill", ["-f", `user-data-dir=${profile} `]);
   await new Promise((done) => setTimeout(done, 1500));
-  await rm(PROFILE, { recursive: true, force: true });
-  chrome = spawn(
+  await rm(profile, { recursive: true, force: true });
+  const launched = spawn(
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     [
       "--headless=new",
-      "--remote-debugging-port=9334",
-      `--user-data-dir=${PROFILE}`,
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${profile}`,
       "--disable-gpu",
       "--no-first-run",
       "--window-size=430,932",
@@ -80,9 +90,10 @@ async function browser() {
     ],
     { stdio: "ignore" },
   );
-  process.on("exit", () => chrome?.kill());
+  chrome ??= launched;
+  process.on("exit", () => launched.kill());
   await new Promise((r) => setTimeout(r, 5000));
-  const targets = await (await fetch("http://127.0.0.1:9334/json/list")).json();
+  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
   const ws = new WebSocket(targets.find((t) => t.type === "page").webSocketDebuggerUrl);
   await new Promise((r) => (ws.onopen = r));
   let id = 0;
@@ -114,6 +125,7 @@ async function browser() {
   await send("Runtime.enable");
   return {
     thrown,
+    send,
     evaluate: async (expression) =>
       (await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }))
         ?.result?.value,
@@ -122,6 +134,28 @@ async function browser() {
       await new Promise((r) => setTimeout(r, wait));
     },
   };
+}
+
+// Light and dark at phone width, then back to the size the checks run at.
+async function shots(view, name) {
+  if (!SHOTS) return;
+  await mkdir(SHOTS, { recursive: true });
+  await view.send("Emulation.setDeviceMetricsOverride", {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 2,
+    mobile: true,
+  });
+  for (const scheme of ["light", "dark"]) {
+    await view.send("Emulation.setEmulatedMedia", {
+      features: [{ name: "prefers-color-scheme", value: scheme }],
+    });
+    await new Promise((r) => setTimeout(r, 900));
+    const shot = await view.send("Page.captureScreenshot", { format: "png" });
+    await writeFile(`${SHOTS}/${name}-${scheme}.png`, Buffer.from(shot.data, "base64"));
+  }
+  await view.send("Emulation.setEmulatedMedia", { features: [] });
+  await view.send("Emulation.clearDeviceMetricsOverride");
 }
 
 const page = await browser();
@@ -724,6 +758,7 @@ expect(
 );
 
 console.log("\nremoving a room says what it cancels, then cancels it");
+await put(`listings/${HOUSE}/checkout/room-back`, { text: str("Leave the back door key.") });
 const removing = JSON.parse(
   await page.evaluate(`
 (async () => {
@@ -770,6 +805,11 @@ expect(
     left.some((doc) => doc.name.endsWith("/c-whole")),
   left.map((doc) => doc.name.split("/").pop()).join(),
 );
+// A removed room's instructions would otherwise sit under an id nothing names.
+expect(
+  "its check-out instructions went with it",
+  (await read(`listings/${HOUSE}/checkout/room-back`)) === null,
+);
 for (const id of [`${HOUSE}-stay`, `${HOUSE}-ask`]) {
   const booking = await read(`bookings/${id}`);
   expect(
@@ -779,6 +819,327 @@ for (const id of [`${HOUSE}-stay`, `${HOUSE}-ask`]) {
       booking?.fields?.cancelReason?.stringValue === "SLOT_CANCELLED",
     JSON.stringify(booking?.fields?.status),
   );
+}
+
+console.log("\nthe host writes check-out instructions for the place and for a room");
+const PLACE_TEXT = "Strip the beds.\nBins go out on Sunday.";
+const ROOM_TEXT = "Attic door code is 4821.";
+const AREA = `
+  const typeArea = (el, v) => {
+    const set = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+    set.call(el, v); el.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const checkoutArea = (root) => [...root.querySelectorAll("label")]
+    .find(l => (l.innerText || "").startsWith("Check-out instructions"))?.querySelector("textarea");
+  const ready = async (root) => {
+    for (let i = 0; i < 20; i++) {
+      const area = checkoutArea(root());
+      if (area && !area.disabled) return area;
+      await nap(300);
+    }
+    return null;
+  };
+`;
+await page.go(`${APP}/#/room/${HOUSE}/edit`, 3000);
+const placeField = JSON.parse(
+  await page.evaluate(`
+(async () => {
+  ${IN_PAGE}
+  ${AREA}
+  const area = await ready(() => document);
+  if (!area) return JSON.stringify({ error: "no check-out field on the form" });
+  const label = area.closest("label").innerText;
+  typeArea(area, ${JSON.stringify(PLACE_TEXT)});
+  await nap(400);
+  area.scrollIntoView({ block: "center" });
+  return JSON.stringify({ label });
+})()
+`),
+);
+expect(
+  "the place form has the field and says who sees it",
+  String(placeField.label).includes("Only guests with a confirmed stay see this."),
+  JSON.stringify(placeField).slice(0, 200),
+);
+await shots(page, "form-field");
+await page.evaluate(`
+(async () => {
+  ${IN_PAGE}
+  named(document, "Save changes").click();
+  await nap(3500);
+  return "saved";
+})()
+`);
+const placeDoc = await read(`listings/${HOUSE}/checkout/place`);
+expect(
+  "the place's instructions reached the database",
+  placeDoc?.fields?.text?.stringValue === PLACE_TEXT &&
+    Object.keys(placeDoc.fields).join() === "text",
+  JSON.stringify(placeDoc?.fields).slice(0, 200),
+);
+const ownerPage = await page.evaluate(`document.body.innerText`);
+expect(
+  "the host's own page shows what is set",
+  /#\/room\/[^/]+$/.test(String(await page.evaluate(`location.hash`))) &&
+    String(ownerPage).includes("Check-out instructions") &&
+    String(ownerPage).includes("Bins go out on Sunday."),
+  String(ownerPage).replace(/\n+/g, " | ").slice(0, 300),
+);
+
+const roomField = JSON.parse(
+  await page.evaluate(`
+(async () => {
+  ${IN_PAGE}
+  ${AREA}
+  named(document, "Attic room").click();
+  await nap(1200);
+  const area = await ready(top);
+  if (!area) return JSON.stringify({ error: "no check-out field in the room sheet" });
+  typeArea(area, ${JSON.stringify(ROOM_TEXT)});
+  await nap(400);
+  area.scrollIntoView({ block: "center" });
+  return JSON.stringify({ label: area.closest("label").innerText });
+})()
+`),
+);
+expect(
+  "the room sheet has the field too",
+  String(roomField.label).includes("Only guests with a confirmed stay see this."),
+  JSON.stringify(roomField).slice(0, 200),
+);
+await shots(page, "room-sheet");
+await page.evaluate(`
+(async () => {
+  ${IN_PAGE}
+  named(top(), "Save changes").click();
+  await nap(3000);
+  await shut();
+  return "saved";
+})()
+`);
+if (page.thrown.length)
+  console.log("  threw:", page.thrown.splice(0).join("\n         ").slice(0, 1200));
+const roomDoc = await read(`listings/${HOUSE}/checkout/room-attic`);
+expect(
+  "the room's instructions reached the database",
+  roomDoc?.fields?.text?.stringValue === ROOM_TEXT,
+  JSON.stringify(roomDoc?.fields).slice(0, 200),
+);
+const houseAfter = await read(`listings/${HOUSE}`);
+// Every friend reads the listing, so the text must not have landed on it.
+expect(
+  "none of it is on the listing itself",
+  !JSON.stringify(houseAfter).includes("4821") && !JSON.stringify(houseAfter).includes("Bins go out"),
+);
+
+console.log("\na new place carries its instructions, and its rooms' with it");
+await page.go(`${APP}/#/new-place`, 3000);
+const made = JSON.parse(
+  await page.evaluate(`
+(async () => {
+  ${IN_PAGE}
+  ${AREA}
+  type(document.querySelector("#listing-title"), "Made with instructions");
+  named(document, "House").click();
+  type(document.querySelector("input[aria-label=Address]"), "Lisbon");
+  typeArea(checkoutArea(document), "Lock up when you go.");
+  await nap(400);
+  named(document, "Add a room").click();
+  await nap(1200);
+  const sheet = top();
+  if (!sheet) return JSON.stringify({ error: "no room sheet" });
+  type(sheet.querySelector("input"), "Box room");
+  typeArea(checkoutArea(sheet), "Window latch sticks.");
+  await nap(400);
+  named(sheet, "Add room").click();
+  await nap(1200);
+  named(document, "Add place").click();
+  for (let i = 0; i < 30; i++) {
+    if (/#\\/room\\//.test(location.hash)) break;
+    await nap(500);
+  }
+  await nap(1500);
+  return JSON.stringify({ hash: location.hash });
+})()
+`),
+);
+if (page.thrown.length)
+  console.log("  threw:", page.thrown.splice(0).join("\n         ").slice(0, 1200));
+const madeId = /#\/room\/([^/]+)$/.exec(String(made.hash))?.[1];
+expect("the place is created", Boolean(madeId), JSON.stringify(made).slice(0, 200));
+const madeDocs = madeId ? ((await read(`listings/${madeId}/checkout`))?.documents ?? []) : [];
+const madeRooms = Object.keys((await read(`listings/${madeId}`))?.fields?.rooms?.mapValue?.fields ?? {});
+expect(
+  "the place's and the room's instructions were saved with it",
+  madeDocs.length === 2 &&
+    madeDocs.some((doc) => doc.name.endsWith("/place") && doc.fields.text.stringValue === "Lock up when you go.") &&
+    madeDocs.some((doc) => doc.name.endsWith(`/${madeRooms[0]}`) && doc.fields.text.stringValue === "Window latch sticks."),
+  JSON.stringify(madeDocs.map((doc) => [doc.name.split("/").pop(), doc.fields.text.stringValue])),
+);
+
+console.log("\na guest sees them on a confirmed stay, and not on one they only asked for");
+const GUEST_EMAIL = `host-check-guest-${Date.now()}@example.com`;
+const guest = await browser(GUEST_PROFILE, 9335);
+await guest.go(APP);
+await guest.evaluate(`
+(async () => {
+  const set = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+  const field = document.querySelector("input");
+  set.call(field, ${JSON.stringify(GUEST_EMAIL)});
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+  await new Promise(r => setTimeout(r, 400));
+  document.querySelector("button[type=submit]").click();
+  await new Promise(r => setTimeout(r, 6000));
+  return "sent";
+})()
+`);
+const guestCodes = await (await fetch(`${AUTH}/emulator/v1/projects/${AUTH_PROJECT}/oobCodes`)).json();
+const guestLink = guestCodes.oobCodes?.findLast((sent) => sent.email === GUEST_EMAIL)?.oobLink;
+const guestCode = guestLink ? new URL(guestLink).searchParams.get("oobCode") : "";
+await guest.go(
+  `${APP}/continue/?mode=signIn&lang=en&apiKey=fake-api-key&oobCode=${encodeURIComponent(guestCode)}#email=${encodeURIComponent(GUEST_EMAIL)}`,
+  10000,
+);
+const everyone = await (
+  await fetch(
+    `${AUTH}/identitytoolkit.googleapis.com/v1/projects/${AUTH_PROJECT}/accounts:query`,
+    {
+      method: "POST",
+      headers: { Authorization: "Bearer owner", "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    },
+  )
+).json();
+const guestUid = everyone.userInfo?.find((u) => u.email === GUEST_EMAIL)?.localId;
+expect("the guest is signed in", Boolean(guestUid));
+if (!guestUid) {
+  console.log(`\n${failures.length} failed`);
+  process.exit(1);
+}
+await put(`users/${guestUid}`, {
+  displayName: str("Guest Under Test"),
+  username: str(""),
+  searchable: { booleanValue: false },
+  createdAt: ts("2026-08-01T00:00:00Z"),
+});
+const STAY = `${HOUSE}-guest-stay`;
+const ASK = `${HOUSE}-guest-ask`;
+await put(
+  `listings/${HOUSE}/windows/e-attic-stay`,
+  houseWindow("09-02", "09-05", "room-attic", { status: str("BOOKED"), bookingId: str(STAY) }),
+);
+await put(`bookings/${STAY}`, {
+  ...houseBooking("e-attic-stay", "09-02", "09-05", "CONFIRMED"),
+  guestId: str(guestUid),
+});
+// The ask is at the OTHER place, where this guest has no stay at all — so it is
+// the rules refusing them, not just the page declining to ask.
+await put(`listings/${LISTING}/checkout/place`, { text: str("Never shown to an asker.") });
+await put(`bookings/${ASK}`, {
+  listingId: str(LISTING),
+  ownerId: str(uid),
+  guestId: str(guestUid),
+  windowId: str(WINDOW),
+  start: str(`${year}-11-01`),
+  end: str(`${year}-11-05`),
+  status: str("REQUESTED"),
+  cancelledBy: { nullValue: null },
+  cancelReason: { nullValue: null },
+  hiddenBy: { arrayValue: {} },
+  createdAt: int(3000),
+});
+
+await guest.go(`${APP}/#/booking/${STAY}`, 1500);
+await guest.evaluate(`location.reload(); "reloading"`);
+await new Promise((r) => setTimeout(r, 9000));
+const stayPage = JSON.parse(
+  await guest.evaluate(`
+(async () => {
+  for (let i = 0; i < 30; i++) {
+    if (/Checking out/.test(document.body.innerText)) break;
+    await new Promise(r => setTimeout(r, 500));
+  }
+  const heading = [...document.querySelectorAll("h2")].find(h => h.innerText.trim() === "Checking out");
+  const section = heading?.closest("section");
+  section?.scrollIntoView({ block: "center" });
+  return JSON.stringify({
+    body: document.body.innerText,
+    section: section?.innerText ?? "",
+    wraps: [...(section?.querySelectorAll("p") ?? [])].map(p => getComputedStyle(p).whiteSpace),
+  });
+})()
+`),
+);
+if (guest.thrown.length)
+  console.log("  threw:", guest.thrown.splice(0).join("\n         ").slice(0, 1200));
+const shown = String(stayPage.section);
+expect("the stay is confirmed and theirs", /Your stay is all set/.test(stayPage.body), String(stayPage.body).replace(/\n+/g, " | ").slice(0, 200));
+expect("it has a Checking out section", shown.startsWith("Checking out"), shown.replace(/\n+/g, " | ").slice(0, 200));
+expect(
+  "the place's comes first, then the room's",
+  shown.includes("Strip the beds.") &&
+    shown.indexOf("Bins go out on Sunday.") < shown.indexOf(ROOM_TEXT),
+  shown.replace(/\n+/g, " | ").slice(0, 300),
+);
+expect(
+  "the room's part is named for the room",
+  shown.slice(shown.indexOf("Bins go out on Sunday."), shown.indexOf(ROOM_TEXT)).includes("Attic room"),
+  shown.replace(/\n+/g, " | ").slice(0, 300),
+);
+expect(
+  "line breaks survive",
+  /Strip the beds\.\n+Bins go out/.test(shown) && stayPage.wraps.every((wrap) => wrap === "pre-wrap"),
+  JSON.stringify(stayPage.wraps),
+);
+await shots(guest, "guest-booking");
+
+await guest.go(`${APP}/#/booking/${ASK}`, 6000);
+const askPage = await guest.evaluate(`
+(async () => {
+  for (let i = 0; i < 20; i++) {
+    if (/Waiting on/.test(document.body.innerText)) break;
+    await new Promise(r => setTimeout(r, 500));
+  }
+  await new Promise(r => setTimeout(r, 2500));
+  return document.body.innerText;
+})()
+`);
+expect("the ask is pending", /Waiting on/.test(String(askPage)), String(askPage).replace(/\n+/g, " | ").slice(0, 200));
+expect(
+  "a pending ask shows no instructions",
+  !/Checking out/.test(String(askPage)) && !/Never shown/.test(String(askPage)),
+  String(askPage).replace(/\n+/g, " | ").slice(0, 300),
+);
+// Asked for directly, as a crafted client would: the rules are what keep an
+// asker out, and a friend-less guest of one place out of another's.
+const asGuest = { headers: { Authorization: `Bearer ${await guestToken()}` } };
+const refused = await fetch(`${DOCS}/listings/${LISTING}/checkout/place`, asGuest);
+expect("and the rules refuse them the document", refused.status === 403, String(refused.status));
+// The same token against their own stay's, or a 403 above proves only that the
+// token was no good.
+const allowed = await fetch(`${DOCS}/listings/${HOUSE}/checkout/place`, asGuest);
+expect("while allowing them their own stay's", allowed.status === 200, String(allowed.status));
+const otherRoom = await fetch(`${DOCS}/listings/${HOUSE}/checkout/room-garden`, asGuest);
+expect("but not another room's", otherRoom.status === 403, String(otherRoom.status));
+
+async function guestToken() {
+  const minted = await (
+    await fetch(`${AUTH}/identitytoolkit.googleapis.com/v1/accounts:signInWithEmailLink?key=fake-api-key`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: GUEST_EMAIL, oobCode: await freshCode() }),
+    })
+  ).json();
+  return minted.idToken;
+}
+async function freshCode() {
+  await fetch(`${AUTH}/identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=fake-api-key`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ requestType: "EMAIL_SIGNIN", email: GUEST_EMAIL, continueUrl: APP }),
+  });
+  const sent = await (await fetch(`${AUTH}/emulator/v1/projects/${AUTH_PROJECT}/oobCodes`)).json();
+  return new URL(sent.oobCodes.findLast((entry) => entry.email === GUEST_EMAIL).oobLink).searchParams.get("oobCode");
 }
 
 if (failures.length) {

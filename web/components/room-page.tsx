@@ -3,6 +3,7 @@
 import { type ReactElement, useEffect, useMemo, useState } from "react";
 import { LuChevronRight, LuMapPin, LuPlus, LuZap } from "react-icons/lu";
 import { fetchBookingIfVisible } from "../utils/bookings";
+import { PLACE_KEY } from "../utils/checkout";
 import { formatDateRange, isExpired, nights, todayIso } from "../utils/format";
 import { fetchRoom, placeTypeLabel } from "../utils/listings";
 import {
@@ -305,6 +306,7 @@ function FriendView({
 function OwnerView({ listing }: { listing: Listing }): ReactElement {
   const {
     myWindows,
+    myCheckout,
     incomingBookings,
     deleteListing,
     hideBookingsById,
@@ -317,6 +319,7 @@ function OwnerView({ listing }: { listing: Listing }): ReactElement {
   } = useKip();
   const { confirm } = useDialog();
   const run = useAction();
+  const placeCheckout = myCheckout[listing.id]?.[PLACE_KEY];
   // Owner-only, which is why the friend view can ignore it entirely.
   const focusedWindowId =
     screen.kind === "room" && screen.id === listing.id
@@ -424,6 +427,16 @@ function OwnerView({ listing }: { listing: Listing }): ReactElement {
           Manage place
         </p>
         <DetailBlock listing={listing} thumbnails={false} />
+        {placeCheckout ? (
+          <div className="mt-4 flex flex-col gap-1">
+            <h3 className="text-sm font-semibold text-muted">
+              Check-out instructions
+            </h3>
+            <p className="whitespace-pre-wrap break-words text-[0.9375rem] leading-relaxed text-text/90">
+              {placeCheckout}
+            </p>
+          </div>
+        ) : null}
       </div>
 
       <div className="flex flex-col gap-6 md:grid md:grid-cols-[minmax(0,1fr)_360px] md:items-start md:gap-8">

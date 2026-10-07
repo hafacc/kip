@@ -4,6 +4,8 @@ import {
   addDoc,
   collection,
   type DocumentData,
+  type DocumentReference,
+  deleteDoc,
   deleteField,
   doc,
   getDoc,
@@ -23,6 +25,8 @@ import {
 import { geohashForLocation } from "geofire-common";
 import type { IconType } from "react-icons";
 import { LuBed, LuBuilding2, LuHouse } from "react-icons/lu";
+import { claimGuestAccess } from "./bookings";
+import { type CheckoutMap, PLACE_KEY, type StayCheckout } from "./checkout";
 import { db, onSnapshotError } from "./firebase";
 import { isExpired } from "./format";
 import { deleteListingPhoto } from "./photos";
@@ -156,20 +160,29 @@ export type NewRoom = {
   readonly name: string;
   readonly note: string;
   readonly photos: readonly ListingPhoto[];
+  // Check-out instructions, kept apart from the room itself.
+  readonly checkout?: string;
 };
 
-/** Create a place, with any rooms drawn up alongside it, in the order given. */
+/**
+ * Create a place, with any rooms drawn up alongside it, in the order given.
+ *
+ * `checkout` is the place's check-out instructions; each room carries its own.
+ * They are written in the same commit as the place.
+ */
 export async function createListing(
   ownerId: string,
   listingId: string,
   input: ListingInput,
   photos: readonly ListingPhoto[],
   rooms: readonly NewRoom[] = [],
+  checkout = "",
 ): Promise<void> {
   if (rooms.length > 0 && !canHaveRooms(input.type)) {
     throw new RoomsNotAllowedError();
   }
-  await setDoc(doc(db(), "listings", listingId), {
+  const batch = writeBatch(db());
+  batch.set(doc(db(), "listings", listingId), {
     ownerId,
     title: input.title,
     type: input.type,
@@ -194,6 +207,17 @@ export async function createListing(
       : {}),
     createdAt: serverTimestamp(),
   });
+  const instructions: [string, string][] = [
+    [PLACE_KEY, checkout.trim()],
+    ...rooms.map((room): [string, string] => [
+      room.id,
+      (room.checkout ?? "").trim(),
+    ]),
+  ];
+  for (const [key, text] of instructions) {
+    if (text) batch.set(checkoutRef(listingId, key), { text });
+  }
+  await batch.commit();
 }
 
 /** Thrown when a place that is itself a room would hold rooms. */
@@ -249,7 +273,8 @@ export async function setListingPhotos(
 // Firestore refuses a batch past 500 writes.
 const BATCH_LIMIT = 500;
 
-// Takes the listing, its windows, their portals and its live bookings. A portal
+// Takes the listing, its windows, their portals, its check-out instructions and
+// its live bookings. A portal
 // left behind would keep serving the place to anyone with the old link, with
 // nothing left to revoke it by.
 //
@@ -262,9 +287,10 @@ export async function deleteListing(
   listing: Listing,
   bookings: readonly Booking[],
 ): Promise<void> {
-  const windows = await getDocs(
-    collection(db(), "listings", listing.id, "windows"),
-  );
+  const [windows, checkout] = await Promise.all([
+    getDocs(collection(db(), "listings", listing.id, "windows")),
+    getDocs(collection(db(), "listings", listing.id, "checkout")),
+  ]);
   const writes: ((batch: WriteBatch) => void)[] = [];
   // Future stays only. A stay that already happened is a record, not an
   // obligation — cancelling it would tell a guest their completed visit was
@@ -301,6 +327,9 @@ export async function deleteListing(
       writes.push((batch) => batch.delete(doc(db(), "portals", roomPortalId)));
     }
   }
+  for (const entry of checkout.docs) {
+    writes.push((batch) => batch.delete(entry.ref));
+  }
   writes.push((batch) => batch.delete(doc(db(), "listings", listing.id)));
   await commitInOrder(writes);
 }
@@ -328,6 +357,7 @@ export function newRoomId(): string {
 /**
  * Add a named room to a flat or house, last in order, and return its id.
  *
+ * `checkout` is the room's check-out instructions, written in the same commit.
  * Throws {@link RoomsNotAllowedError} for a place of type ROOM.
  */
 export async function addRoom(
@@ -335,9 +365,11 @@ export async function addRoom(
   input: RoomInput,
   roomId: string = newRoomId(),
   photos: readonly ListingPhoto[] = [],
+  checkout = "",
 ): Promise<string> {
   if (!canHaveRooms(listing.type)) throw new RoomsNotAllowedError();
-  await updateDoc(doc(db(), "listings", listing.id), {
+  const batch = writeBatch(db());
+  batch.update(doc(db(), "listings", listing.id), {
     [`rooms.${roomId}`]: {
       name: input.name,
       note: input.note,
@@ -346,6 +378,9 @@ export async function addRoom(
       order: nextRoomOrder(listing.rooms),
     },
   });
+  const text = checkout.trim();
+  if (text) batch.set(checkoutRef(listing.id, roomId), { text });
+  await batch.commit();
   return roomId;
 }
 
@@ -391,7 +426,7 @@ export async function reorderRooms(
  *
  * Cancels every future live booking on the room's dates (stamped as the owner
  * calling the dates off), deletes those dates and their links, the room's own
- * link and its photos, then the room. One batch while it fits; past 500 writes
+ * link, check-out instructions and photos, then the room. One batch while it fits; past 500 writes
  * it goes in that order, the room last, and a retry re-derives everything.
  * `bookings` is the owner's incoming bookings.
  */
@@ -436,6 +471,7 @@ export async function removeRoom(
   if (roomPortalId) {
     writes.push((batch) => batch.delete(doc(db(), "portals", roomPortalId)));
   }
+  writes.push((batch) => batch.delete(checkoutRef(listing.id, roomId)));
   writes.push((batch) =>
     batch.update(doc(db(), "listings", listing.id), {
       [`rooms.${roomId}`]: deleteField(),
@@ -629,4 +665,88 @@ export async function fetchRoom(listingId: string): Promise<{
     return [];
   });
   return { listing, windows };
+}
+
+function checkoutRef(listingId: string, key: string): DocumentReference {
+  return doc(db(), "listings", listingId, "checkout", key);
+}
+
+/** Watch every set of instructions a place has. Owner only. */
+export function watchCheckout(
+  listingId: string,
+  onChange: (checkout: CheckoutMap) => void,
+): () => void {
+  return onSnapshot(
+    collection(db(), "listings", listingId, "checkout"),
+    (snap) =>
+      onChange(
+        Object.fromEntries(
+          snap.docs.map((entry) => [entry.id, String(entry.data().text ?? "")]),
+        ),
+      ),
+    onSnapshotError("checkout"),
+  );
+}
+
+/** Save the instructions for a place or one of its rooms; blank text removes them. */
+export async function setCheckout(
+  listingId: string,
+  key: string,
+  text: string,
+): Promise<void> {
+  const trimmed = text.trim();
+  if (trimmed) {
+    await setDoc(checkoutRef(listingId, key), { text: trimmed });
+  } else {
+    await deleteDoc(checkoutRef(listingId, key));
+  }
+}
+
+type Answer = { readonly text: string | null; readonly refused: boolean };
+
+async function readCheckout(listingId: string, key: string): Promise<Answer> {
+  try {
+    const snap = await getDoc(checkoutRef(listingId, key));
+    const text = snap.exists() ? String(snap.data().text ?? "") : "";
+    return { text: text || null, refused: false };
+  } catch (error) {
+    if ((error as { code?: string })?.code !== "permission-denied") throw error;
+    return { text: null, refused: true };
+  }
+}
+
+/**
+ * Fetch the check-out instructions for a guest's own confirmed stay.
+ *
+ * The place's, plus the room's when the stay is in one. The guest pointer is
+ * claimed for THIS stay first, since it is what the rules read and it holds
+ * one stay per place — a guest with an earlier visit to another room would
+ * otherwise be refused this one's.
+ */
+export async function fetchStayCheckout(
+  booking: Pick<Booking, "id" | "listingId" | "windowId">,
+  guestUid: string,
+): Promise<StayCheckout> {
+  const claim = (): Promise<void> =>
+    claimGuestAccess(booking.listingId, guestUid, booking.id);
+  const [window] = await Promise.all([
+    fetchWindow(booking.listingId, booking.windowId),
+    claim(),
+  ]);
+  const roomId = window?.roomId ?? null;
+  const fetchBoth = (): Promise<[Answer, Answer]> =>
+    Promise.all([
+      readCheckout(booking.listingId, PLACE_KEY),
+      roomId
+        ? readCheckout(booking.listingId, roomId)
+        : Promise.resolve({ text: null, refused: false }),
+    ]);
+  let [place, room] = await fetchBoth();
+  if (place.refused || room.refused) {
+    // The store claims every confirmed stay on load, and a claim for another
+    // stay here may have landed after ours.
+    await claim();
+    [place, room] = await fetchBoth();
+  }
+  return { place: place.text, room: room.text, roomId };
 }

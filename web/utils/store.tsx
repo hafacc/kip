@@ -38,6 +38,7 @@ import {
   watchIncomingBookings,
   watchMyTrips,
 } from "./bookings";
+import type { CheckoutMap } from "./checkout";
 import { clientState, recordDebugEvent } from "./debug";
 import { hasUnreadFeedback, readAdmin } from "./feedback";
 import {
@@ -66,6 +67,7 @@ import {
   deleteListing as fbDeleteListing,
   removeRoom as fbRemoveRoom,
   reorderRooms as fbReorderRooms,
+  setCheckout as fbSetCheckout,
   setListingPhotos as fbSetListingPhotos,
   setRoomPhotos as fbSetRoomPhotos,
   setWindowAutoAccept as fbSetWindowAutoAccept,
@@ -79,6 +81,7 @@ import {
   type NewRoom,
   type RoomInput,
   type WindowInput,
+  watchCheckout,
   watchMyListings,
   watchWindows,
 } from "./listings";
@@ -158,6 +161,7 @@ import {
 } from "./username";
 
 type WindowMap = Readonly<Record<string, readonly AvailabilityWindow[]>>;
+type CheckoutByListing = Readonly<Record<string, CheckoutMap>>;
 
 type ContextShape = {
   configured: boolean;
@@ -202,6 +206,9 @@ type ContextShape = {
   outgoingRequests: ConnectRequest[];
   myListings: Listing[];
   myWindows: WindowMap;
+  // Check-out instructions for each of my places, by listing id. A place is
+  // absent until its first answer arrives.
+  myCheckout: CheckoutByListing;
   friendListings: Listing[];
   friendWindows: WindowMap;
   trips: Booking[];
@@ -256,6 +263,7 @@ type ContextShape = {
     input: ListingInput,
     photos: readonly ListingPhoto[],
     rooms?: readonly NewRoom[],
+    checkout?: string,
   ) => Promise<void>;
   updateListing: (listingId: string, input: ListingInput) => Promise<void>;
   setListingPhotos: (
@@ -270,7 +278,10 @@ type ContextShape = {
     input: RoomInput,
     roomId?: string,
     photos?: readonly ListingPhoto[],
+    checkout?: string,
   ) => Promise<string>;
+  // `key` is PLACE_KEY or a room id; blank text removes the instructions.
+  setCheckout: (listingId: string, key: string, text: string) => Promise<void>;
   updateRoom: (
     listingId: string,
     roomId: string,
@@ -357,6 +368,7 @@ const EMPTY_BOOKINGS: Booking[] = [];
 const EMPTY_PROFILES: Profile[] = [];
 const EMPTY_SEARCHES: SavedSearch[] = [];
 const EMPTY_WINDOWS: WindowMap = {};
+const EMPTY_CHECKOUT: CheckoutByListing = {};
 
 // Applied at the two subscriptions rather than per list, so every surface
 // honours a hide without each one remembering to. Only a CANCELLED booking can
@@ -595,6 +607,8 @@ export function KipProvider({ children }: { children: ReactNode }) {
     useState<ConnectRequest[]>(EMPTY_REQUESTS);
   const [myListings, setMyListings] = useState<Listing[]>(EMPTY_LISTINGS);
   const [myWindows, setMyWindows] = useState<WindowMap>(EMPTY_WINDOWS);
+  const [myCheckout, setMyCheckout] =
+    useState<CheckoutByListing>(EMPTY_CHECKOUT);
   const [friendListings, setFriendListings] =
     useState<Listing[]>(EMPTY_LISTINGS);
   const [friendWindows, setFriendWindows] = useState<WindowMap>(EMPTY_WINDOWS);
@@ -960,14 +974,18 @@ export function KipProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!configured || !user) {
       setMyWindows(EMPTY_WINDOWS);
+      setMyCheckout(EMPTY_CHECKOUT);
       return;
     }
     const listingIds = watchedListingsKey ? watchedListingsKey.split(",") : [];
-    const unsubs = listingIds.map((listingId) =>
+    const unsubs = listingIds.flatMap((listingId) => [
       watchWindows(listingId, (windows) =>
         setMyWindows((prev) => ({ ...prev, [listingId]: windows })),
       ),
-    );
+      watchCheckout(listingId, (checkout) =>
+        setMyCheckout((prev) => ({ ...prev, [listingId]: checkout })),
+      ),
+    ]);
     return () => {
       for (const unsub of unsubs) unsub();
     };
@@ -1072,6 +1090,7 @@ export function KipProvider({ children }: { children: ReactNode }) {
     setOutgoing(EMPTY_REQUESTS);
     setMyListings(EMPTY_LISTINGS);
     setMyWindows(EMPTY_WINDOWS);
+    setMyCheckout(EMPTY_CHECKOUT);
     setFriendListings(EMPTY_LISTINGS);
     setFriendWindows(EMPTY_WINDOWS);
     setTrips(EMPTY_BOOKINGS);
@@ -1411,9 +1430,17 @@ export function KipProvider({ children }: { children: ReactNode }) {
       input: ListingInput,
       photos: readonly ListingPhoto[],
       rooms: readonly NewRoom[] = [],
+      checkout = "",
     ) => {
       if (!user) throw new Error("not signed in");
-      return fbCreateListing(user.uid, listingId, input, photos, rooms);
+      return fbCreateListing(
+        user.uid,
+        listingId,
+        input,
+        photos,
+        rooms,
+        checkout,
+      );
     },
     [user],
   );
@@ -1743,6 +1770,7 @@ export function KipProvider({ children }: { children: ReactNode }) {
     outgoingRequests,
     myListings,
     myWindows,
+    myCheckout,
     friendListings,
     friendWindows,
     trips,
@@ -1784,6 +1812,7 @@ export function KipProvider({ children }: { children: ReactNode }) {
     setListingPhotos,
     deleteListing,
     addRoom: fbAddRoom,
+    setCheckout: fbSetCheckout,
     updateRoom,
     setRoomPhotos,
     reorderRooms: fbReorderRooms,

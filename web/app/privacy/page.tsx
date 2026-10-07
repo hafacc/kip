@@ -60,8 +60,10 @@ export default function PrivacyPage(): ReactElement {
         </li>
         <li>
           <strong>Your places</strong> — titles, descriptions, photos, the dates
-          they're free, and a location if you add one. You choose how precise
-          that location is; it's shown only to people who can see the place.
+          they're free, a location if you add one, and any check-out
+          instructions you write. You choose how precise that location is; it's
+          shown only to people who can see the place. Check-out instructions are
+          shown only to guests with a confirmed stay.
         </li>
         <li>
           <strong>Your friendships and requests</strong> — who you're connected

@@ -115,6 +115,34 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/bookings/$(bookingId)).data.listingId == listingId;
     }
 
+    // The stay the caller's guest pointer names. One get() per path rather than
+    // exists() then get(), which are counted apart — a pointer or booking that
+    // is gone makes this an error, and an error is a no.
+    function pointedStay(listingId) {
+      let pointer = get(/databases/$(database)/documents/listings/$(listingId)/guests/$(request.auth.uid)).data;
+      return get(/databases/$(database)/documents/bookings/$(pointer.get('bookingId', ''))).data;
+    }
+
+    // Narrower than guestOfListing: check-out instructions can hold a door
+    // code, so they close with profile sight while the listing stays readable.
+    function stayOpensCheckout(stay, listingId) {
+      return stay.status == 'CONFIRMED'
+        && stay.guestId == request.auth.uid
+        && stay.listingId == listingId
+        && endedWithin(stay.end, staySightDays());
+    }
+
+    function guestOfPlace(listingId) {
+      return stayOpensCheckout(pointedStay(listingId), listingId);
+    }
+
+    // The stay must also be on dates that offer exactly this room.
+    function guestOfRoom(listingId, roomId) {
+      let stay = pointedStay(listingId);
+      return stayOpensCheckout(stay, listingId)
+        && get(/databases/$(database)/documents/listings/$(listingId)/windows/$(stay.windowId)).data.get('roomId', null) == roomId;
+    }
+
     // A read request has no body, so a visitor proves they know a token by WRITING
     // a grant under it; reads then compare that against whichever token the
     // document currently sits under, which is why revoking is instant.
@@ -488,6 +516,29 @@ service cloud.firestore {
           && bookingBacksGuest(listingId, request.resource.data.bookingId);
         allow delete: if isSignedIn()
           && (request.auth.uid == guestUid || request.auth.uid == listingOwner(listingId));
+      }
+
+      // Check-out instructions, kept off the listing because rules are per
+      // document and every friend reads that one: these can hold a door code.
+      // `place` is for anyone with a confirmed stay here; any other key is a
+      // room id, for a guest whose confirmed stay is in that room — both until
+      // staySightDays after check-out. Friendship, an ask and a share link open
+      // none of them.
+      match /checkout/{key} {
+        allow get: if request.auth.uid == listingOwner(listingId)
+          || (key == 'place'
+              ? guestOfPlace(listingId)
+              : guestOfRoom(listingId, key));
+        allow list: if request.auth.uid == listingOwner(listingId);
+        // getAfter, so a new place can carry its instructions in the commit
+        // that creates it.
+        allow create, update: if isSignedIn()
+          && request.auth.uid == getAfter(/databases/$(database)/documents/listings/$(listingId)).data.ownerId
+          && request.resource.data.keys().hasOnly(['text'])
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 2000;
+        allow delete: if isSignedIn() && request.auth.uid == listingOwner(listingId);
       }
 
       match /windows/{windowId} {

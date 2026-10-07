@@ -220,6 +220,9 @@ async function seed(leaver) {
     bookingId: str("teardown-booking-incoming"),
   });
 
+  await put(`listings/${MINE}/checkout/place`, { text: str("Bins out on Sunday.") });
+  await put(`listings/${MINE}/checkout/some-room`, { text: str("Door code 1234.") });
+
   // Someone else's place, where the leaver is the guest — the one slot that has
   // to be HANDED BACK rather than deleted.
   await put(`listings/${THEIRS}`, {
@@ -354,6 +357,11 @@ expect(
   "its slots went with it",
   (await read(`listings/${MINE}/windows/w1`)) === null &&
     (await read(`listings/${MINE}/windows/w2`)) === null,
+);
+expect(
+  "so did its check-out instructions",
+  (await read(`listings/${MINE}/checkout/place`)) === null &&
+    (await read(`listings/${MINE}/checkout/some-room`)) === null,
 );
 expect(
   "so did the guest pointer under it",

@@ -10,6 +10,7 @@ import {
 } from "../utils/listings";
 import { canHaveRooms, roomList, wholePlaceLabel } from "../utils/rooms";
 import type { Listing, ListingPhoto, ListingType } from "../utils/types";
+import CheckoutField from "./checkout-field";
 import PhotoStrip from "./photo-strip";
 import { DraftRoomSheet, RoomSheet } from "./room-sheet";
 import { RoomRow } from "./rooms";
@@ -37,6 +38,7 @@ export default function ListingForm({
   ownerId,
   listingId,
   photos,
+  checkout,
   draftRooms,
   onSubmit,
   onPhotos,
@@ -47,10 +49,13 @@ export default function ListingForm({
   ownerId: string;
   listingId: string;
   photos: readonly ListingPhoto[];
+  // The place's stored check-out instructions; undefined until they are known.
+  checkout: string | undefined;
   // The rooms of a place not yet created. An existing place's are read off
   // `initial` and edited in place, since they already exist.
   draftRooms: readonly NewRoom[];
-  onSubmit: (input: ListingInput) => Promise<void>;
+  // `checkout` is null when the instructions were left untouched.
+  onSubmit: (input: ListingInput, checkout: string | null) => Promise<void>;
   onPhotos: (photos: ListingPhoto[]) => Promise<void>;
   onDraftRoom: (room: NewRoom) => void;
   onDropDraftRoom: (room: NewRoom) => void;
@@ -76,6 +81,9 @@ export default function ListingForm({
     null,
   );
   const [typeRefused, setTypeRefused] = useState(false);
+  // Null until typed in, so instructions that load after the form opens still
+  // show rather than being overwritten by an empty field.
+  const [checkoutDraft, setCheckoutDraft] = useState<string | null>(null);
   const rooms: readonly NewRoom[] = initial ? roomList(initial) : draftRooms;
 
   function chooseType(next: ListingType): void {
@@ -111,16 +119,19 @@ export default function ListingForm({
         const result = (await geocodeMatches(label))[0];
         if (result) resolved = { lat: result.lat, lng: result.lng };
       }
-      await onSubmit({
-        title: title.trim(),
-        type,
-        description: description.trim(),
-        location: {
-          label: label.trim(),
-          lat: resolved?.lat ?? 0,
-          lng: resolved?.lng ?? 0,
+      await onSubmit(
+        {
+          title: title.trim(),
+          type,
+          description: description.trim(),
+          location: {
+            label: label.trim(),
+            lat: resolved?.lat ?? 0,
+            lng: resolved?.lng ?? 0,
+          },
         },
-      });
+        checkoutDraft === null ? null : checkoutDraft.trim(),
+      );
     } catch (error) {
       // A room added in another tab since this form opened.
       if (error instanceof RoomsNotAllowedError) setTypeRefused(true);
@@ -253,6 +264,12 @@ export default function ListingForm({
           onBusyChange={setUploading}
         />
       </div>
+
+      <CheckoutField
+        value={checkoutDraft ?? checkout ?? ""}
+        onChange={setCheckoutDraft}
+        disabled={checkout === undefined}
+      />
 
       {canHaveRooms(type) ? (
         <div className="flex flex-col gap-1.5">

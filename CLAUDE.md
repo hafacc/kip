@@ -34,6 +34,8 @@ bookings/{bookingId}               { listingId, ownerId, guestId, windowId, star
 users/{uid}/knownBy/{readerUid}    { bookingId }   # reader-written POINTER; lets the two parties of a
                                      # confirmed stay read each other's profile. Re-checked live.
 listings/{listingId}/guests/{uid}  { bookingId }   # guest-written POINTER; re-checked live, inert once cancelled
+listings/{listingId}/checkout/{key} { text }   # check-out instructions; key is "place" or a room id.
+                                     # Owner-written; read ONLY by a guest whose stay is CONFIRMED
 portals/{uuid}                     { scope: "USER"|"LISTING"|"SLOT"|"ROOM", ownerId, ownerName, ownerPhotoURL,
                                      listingId?,                      # LISTING and ROOM scope
                                      roomId?, room: { name, note, photos, houseTitle, houseType, locationLabel }?,  # ROOM only
@@ -655,6 +657,21 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   that name one read it off the slot (`use-stay-place.ts`), and notification bodies say "Back
   bedroom at Erik's house" when the slot and room can still be read — never the subject, which is
   also the text message and has no room for an uncapped name.
+- **Check-out instructions are their own documents, because they can hold a door code.** A host
+  may write one for the place and one for each room; only a guest whose stay is CONFIRMED reads
+  them, under "Checking out" on their booking page. Rules are per document and every friend reads
+  the listing, so the text lives at `listings/{id}/checkout/{key}`, `key` being `place` or a room
+  id. `place` opens to `guestOfListing`; a room's opens to `guestOfRoom`, the same pointer narrowed
+  to a stay whose slot offers exactly that room, so a guest in one room can't read another's.
+  Friendship, an ask and a share link open none of them. Blank text deletes the document.
+
+  The write rule finds the owner with `getAfter`, which is what lets a new place carry its
+  instructions in the commit that creates it. **The guest pointer holds one stay per place**, so
+  `fetchStayCheckout` re-claims it for the booking being viewed before reading, and once more on a
+  refusal: someone with stays in two rooms of one house would otherwise be refused the second.
+  Access ends 60 days after checkout, the same `endedWithin` cut-off profile sight uses, checked
+  on the checkout read path only (`stayOpensCheckout`) so reading the listing is unaffected; the
+  booking page mirrors it and stops fetching. Deleting a listing, removing a room and the leaving teardown each delete them.
 - **Window status is owner-only; bookings drive it.** A guest can't write a listing's `windows`
   (rules), so requesting a booking only creates the `bookings` doc (`OPEN` stays `OPEN`). The
   owner's **confirm** flips the window to `BOOKED` and the booking to `CONFIRMED` in one batch;

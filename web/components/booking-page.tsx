@@ -10,8 +10,13 @@ import {
   LuX,
 } from "react-icons/lu";
 import { fetchBookingIfVisible } from "../utils/bookings";
+import {
+  checkoutParts,
+  type StayCheckout,
+  stayOpensCheckout,
+} from "../utils/checkout";
 import { formatDateRange, isExpired, nights } from "../utils/format";
-import { listingTypeIcon } from "../utils/listings";
+import { fetchStayCheckout, listingTypeIcon } from "../utils/listings";
 import { useKip } from "../utils/store";
 import type { Booking, CancelReason } from "../utils/types";
 import Avatar from "./avatar";
@@ -19,7 +24,7 @@ import CoverPhoto from "./cover-photo";
 import { useAction, useDialog, useFailure } from "./dialog";
 import Button from "./ui/button";
 import Chip, { type ChipTone } from "./ui/chip";
-import { Group, Row } from "./ui/list";
+import { Group, Row, Section } from "./ui/list";
 import { useStayPlace } from "./use-stay-place";
 
 // `byMe` is the only axis needed, because the reason and the side always agree —
@@ -109,6 +114,34 @@ export default function BookingPage({ id }: { id: string }): ReactElement {
     };
   }, [id, iAmPartyTo]);
 
+  // Only the guest of a confirmed stay may read these, and only until the
+  // rules' cut-off after check-out; they refuse everyone else, so nobody else
+  // asks.
+  const [checkout, setCheckout] = useState<{
+    id: string;
+    found: StayCheckout;
+  } | null>(null);
+  const guestUid = found?.guestId === user?.uid ? user?.uid : undefined;
+  const staying =
+    found !== undefined && stayOpensCheckout(found) && guestUid !== undefined;
+  const stayListingId = found?.listingId;
+  const stayWindowId = found?.windowId;
+  useEffect(() => {
+    if (!staying || !guestUid || !stayListingId || !stayWindowId) return;
+    let live = true;
+    fetchStayCheckout(
+      { id, listingId: stayListingId, windowId: stayWindowId },
+      guestUid,
+    )
+      .then((answer) => {
+        if (live) setCheckout({ id, found: answer });
+      })
+      .catch((error) => console.error("stayCheckout", error));
+    return () => {
+      live = false;
+    };
+  }, [id, staying, guestUid, stayListingId, stayWindowId]);
+
   // The ordinary double-click only; the transaction is the real protection.
   async function confirmStay(): Promise<void> {
     if (!booking) return;
@@ -171,6 +204,22 @@ export default function BookingPage({ id }: { id: string }): ReactElement {
       <PlaceIcon size={18} />
     </span>
   );
+
+  // Pinned to this stay and its current state: the answer outlives a move to
+  // another booking, and a cancel that lands while the page is open.
+  const stayCheckout =
+    iAmGuest && stayOpensCheckout(booking) && checkout?.id === id
+      ? checkout.found
+      : null;
+  const checkingOut = stayCheckout
+    ? checkoutParts(
+        stayCheckout.place,
+        stayCheckout.room,
+        (stayCheckout.roomId
+          ? room?.rooms[stayCheckout.roomId]?.name
+          : undefined) ?? null,
+      )
+    : [];
 
   // The page it's on has nothing left to show once hidden.
   async function clearFromList(cleared: Booking): Promise<void> {
@@ -327,6 +376,25 @@ export default function BookingPage({ id }: { id: string }): ReactElement {
           <LuChevronRight className="shrink-0 text-faint" />
         </Row>
       </Group>
+
+      {checkingOut.length > 0 ? (
+        <Section title="Checking out">
+          <div className="flex flex-col gap-4 rounded-3xl bg-surface p-4 shadow-card">
+            {checkingOut.map((part) => (
+              <div key={part.label ?? ""} className="flex flex-col gap-1">
+                {part.label ? (
+                  <h3 className="text-sm font-semibold text-muted">
+                    {part.label}
+                  </h3>
+                ) : null}
+                <p className="whitespace-pre-wrap break-words text-[0.9375rem] leading-relaxed">
+                  {part.text}
+                </p>
+              </div>
+            ))}
+          </div>
+        </Section>
+      ) : null}
 
       {!iAmParty ? null : booking.status !== "CANCELLED" ? (
         <div className="flex flex-col gap-2">

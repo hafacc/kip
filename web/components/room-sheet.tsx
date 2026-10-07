@@ -20,6 +20,7 @@ import type {
   ListingPhoto,
 } from "../utils/types";
 import AddDatesSheet from "./add-dates-sheet";
+import CheckoutField from "./checkout-field";
 import { useAction, useDialog, useFailure } from "./dialog";
 import PhotoStrip from "./photo-strip";
 import ShareLink from "./share-link";
@@ -100,8 +101,11 @@ function RoomFields({
   listingId,
   name,
   note,
+  checkout,
+  checkoutKnown = true,
   onName,
   onNote,
+  onCheckout,
   photos,
   onPhotos,
   saveLabel,
@@ -113,8 +117,12 @@ function RoomFields({
   listingId: string;
   name: string;
   note: string;
+  checkout: string;
+  // False while a saved room's instructions are still loading.
+  checkoutKnown?: boolean;
   onName: (name: string) => void;
   onNote: (note: string) => void;
+  onCheckout: (checkout: string) => void;
   photos: readonly ListingPhoto[];
   onPhotos: (photos: ListingPhoto[]) => Promise<void>;
   saveLabel: string;
@@ -176,6 +184,11 @@ function RoomFields({
           onBusyChange={setUploading}
         />
       </div>
+      <CheckoutField
+        value={checkout}
+        onChange={onCheckout}
+        disabled={!checkoutKnown}
+      />
       <Button
         onClick={save}
         disabled={busy || uploading || !dirty || !name.trim()}
@@ -188,11 +201,12 @@ function RoomFields({
 }
 
 /**
- * A room of a place that exists: its name, note, photos, link and dates.
+ * A room of a place that exists: its name, note, photos, check-out
+ * instructions, link and dates.
  *
  * With `roomId` null it adds a room instead, and shows only what a room needs
- * to exist. Edits to an existing room's photos land at once; its name and note
- * wait for Save.
+ * to exist. Edits to an existing room's photos land at once; its name, note
+ * and instructions wait for Save.
  */
 export function RoomSheet({
   listing,
@@ -205,9 +219,11 @@ export function RoomSheet({
 }): ReactElement | null {
   const {
     myWindows,
+    myCheckout,
     incomingBookings,
     addRoom,
     updateRoom,
+    setCheckout,
     setRoomPhotos,
     removeRoom,
     publishRoomPortal,
@@ -221,8 +237,17 @@ export function RoomSheet({
   const [note, setNote] = useState(room?.note ?? "");
   const [draftPhotos, setDraftPhotos] = useState<readonly ListingPhoto[]>([]);
   const [addingDates, setAddingDates] = useState(false);
+  // Null until typed in, so instructions that load after the sheet opens still
+  // show rather than being overwritten by an empty field.
+  const [checkoutDraft, setCheckoutDraft] = useState<string | null>(null);
   const keep = useAbandonedPhotos(listing.ownerId, listing.id, draftPhotos);
   const windows = myWindows[listing.id] ?? [];
+  const placeCheckout = myCheckout[listing.id];
+  const storedCheckout = room ? (placeCheckout?.[room.id] ?? "") : "";
+  const checkout = checkoutDraft ?? storedCheckout;
+  const detailsChanged =
+    !room || name.trim() !== room.name || note.trim() !== room.note;
+  const checkoutChanged = checkout.trim() !== storedCheckout;
 
   // Removed from under the sheet, here or in another tab.
   const gone = roomId !== null && !room;
@@ -234,9 +259,11 @@ export function RoomSheet({
   async function save(): Promise<void> {
     const input = { name: name.trim(), note: note.trim() };
     if (room) {
-      await updateRoom(listing.id, room.id, input);
+      if (detailsChanged) await updateRoom(listing.id, room.id, input);
+      if (checkoutChanged) await setCheckout(listing.id, room.id, checkout);
+      setCheckoutDraft(null);
     } else {
-      await addRoom(listing, input, draftId, draftPhotos);
+      await addRoom(listing, input, draftId, draftPhotos, checkout);
       keep();
       onClose();
     }
@@ -274,8 +301,11 @@ export function RoomSheet({
         listingId={listing.id}
         name={name}
         note={note}
+        checkout={checkout}
+        checkoutKnown={!room || placeCheckout !== undefined}
         onName={setName}
         onNote={setNote}
+        onCheckout={setCheckoutDraft}
         photos={room ? room.photos : draftPhotos}
         onPhotos={
           room
@@ -283,7 +313,7 @@ export function RoomSheet({
             : async (photos) => setDraftPhotos(photos)
         }
         saveLabel={room ? "Save changes" : "Add room"}
-        dirty={!room || name.trim() !== room.name || note.trim() !== room.note}
+        dirty={detailsChanged || checkoutChanged}
         onSave={save}
       >
         {room ? (
@@ -321,7 +351,8 @@ export function RoomSheet({
 }
 
 /**
- * A room of a place that doesn't exist yet: name, note and photos only.
+ * A room of a place that doesn't exist yet: name, note, photos and check-out
+ * instructions only.
  *
  * Nothing is written; the room is handed back to the form, which creates it
  * with the place. With `room` null it draws up a new one.
@@ -345,11 +376,16 @@ export function DraftRoomSheet({
   const [draftId] = useState(newRoomId);
   const [name, setName] = useState(room?.name ?? "");
   const [note, setNote] = useState(room?.note ?? "");
+  const [checkout, setCheckout] = useState(room?.checkout ?? "");
   const [draftPhotos, setDraftPhotos] = useState<readonly ListingPhoto[]>([]);
   const keep = useAbandonedPhotos(ownerId, listingId, draftPhotos);
 
   async function save(): Promise<void> {
-    const input = { name: name.trim(), note: note.trim() };
+    const input = {
+      name: name.trim(),
+      note: note.trim(),
+      checkout: checkout.trim(),
+    };
     if (room) {
       onSave({ ...room, ...input });
     } else {
@@ -380,15 +416,22 @@ export function DraftRoomSheet({
         listingId={listingId}
         name={name}
         note={note}
+        checkout={checkout}
         onName={setName}
         onNote={setNote}
+        onCheckout={setCheckout}
         photos={room ? room.photos : draftPhotos}
         onPhotos={async (photos) => {
           if (room) onSave({ ...room, photos });
           else setDraftPhotos(photos);
         }}
         saveLabel={room ? "Save changes" : "Add room"}
-        dirty={!room || name.trim() !== room.name || note.trim() !== room.note}
+        dirty={
+          !room ||
+          name.trim() !== room.name ||
+          note.trim() !== room.note ||
+          checkout.trim() !== (room.checkout ?? "")
+        }
         onSave={save}
       >
         {room ? (
