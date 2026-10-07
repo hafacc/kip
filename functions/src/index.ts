@@ -505,16 +505,43 @@ const secrets = [RESEND_API_KEY];
 // A trigger has no session to hop with, but runs as admin, so it reads both
 // profiles directly — from Firestore, since the Auth record is only a mirror.
 async function withIdentities(booking: DocumentData): Promise<DocumentData> {
-  const [host, guest] = await Promise.all([
+  const [host, guest, room] = await Promise.all([
     db.doc(`users/${booking.ownerId}`).get(),
     db.doc(`users/${booking.guestId}`).get(),
+    // Wording only: a failed read costs the room's name, never the notice.
+    roomFor(booking).catch(() => WHOLE_PLACE),
   ]);
   return {
     ...booking,
+    ...room,
     hostName: host.data()?.displayName ?? "",
     hostPhotoURL: host.data()?.photoURL ?? null,
     guestName: guest.data()?.displayName ?? "",
     guestPhotoURL: guest.data()?.photoURL ?? null,
+  };
+}
+
+type RoomWording = { roomName: string; placeTitle: string };
+
+const WHOLE_PLACE: RoomWording = { roomName: "", placeTitle: "" };
+
+// The room a booking's dates offer and the place it is in, so the notice can
+// name both. Empty for the
+// whole place, and for dates or a room that have since gone — a slot being
+// called off deletes it in the same commit that cancels the stay.
+async function roomFor(booking: DocumentData): Promise<RoomWording> {
+  if (!booking.listingId || !booking.windowId) return WHOLE_PLACE;
+  const window = await db
+    .doc(`listings/${booking.listingId}/windows/${booking.windowId}`)
+    .get();
+  const roomId = window.data()?.roomId;
+  if (typeof roomId !== "string" || !roomId) return WHOLE_PLACE;
+  const listing = await db.doc(`listings/${booking.listingId}`).get();
+  const name = listing.data()?.rooms?.[roomId]?.name;
+  const title = listing.data()?.title;
+  return {
+    roomName: typeof name === "string" ? name : "",
+    placeTitle: typeof title === "string" ? title : "",
   };
 }
 
@@ -526,6 +553,8 @@ function pickIdentities(booking: DocumentData): DocumentData {
     hostPhotoURL: booking.hostPhotoURL,
     guestName: booking.guestName,
     guestPhotoURL: booking.guestPhotoURL,
+    roomName: booking.roomName,
+    placeTitle: booking.placeTitle,
   };
 }
 

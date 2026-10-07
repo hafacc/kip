@@ -20,6 +20,7 @@ import { useAction, useDialog, useFailure } from "./dialog";
 import Button from "./ui/button";
 import Chip, { type ChipTone } from "./ui/chip";
 import { Group, Row } from "./ui/list";
+import { useStayPlace } from "./use-stay-place";
 
 // `byMe` is the only axis needed, because the reason and the side always agree —
 // every reason but STAY_CANCELLED belongs to exactly one party.
@@ -60,9 +61,6 @@ export default function BookingPage({ id }: { id: string }): ReactElement {
     user,
     trips,
     incomingBookings,
-    friendListings,
-    myListings,
-    tripListings,
     knownPerson,
     cancelTrip,
     confirmBooking,
@@ -82,6 +80,13 @@ export default function BookingPage({ id }: { id: string }): ReactElement {
     undefined,
   );
   const [looked, setLooked] = useState(false);
+  const found: Booking | undefined =
+    trips.find((candidate) => candidate.id === id) ??
+    incomingBookings.find((candidate) => candidate.id === id) ??
+    // Pinned to the id being rendered: the state outlives a move to another
+    // booking, so without this the previous one shows under the new URL.
+    (fetchedBooking?.id === id ? fetchedBooking : undefined);
+  const { listing: room, room: stayRoom } = useStayPlace(found);
   const iAmPartyTo =
     trips.some((candidate) => candidate.id === id) ||
     incomingBookings.some((candidate) => candidate.id === id);
@@ -125,12 +130,7 @@ export default function BookingPage({ id }: { id: string }): ReactElement {
     }
   }
 
-  const booking: Booking | undefined =
-    trips.find((candidate) => candidate.id === id) ??
-    incomingBookings.find((candidate) => candidate.id === id) ??
-    // Pinned to the id being rendered: the state outlives a move to another
-    // booking, so without this the previous one shows under the new URL.
-    (fetchedBooking?.id === id ? fetchedBooking : undefined);
+  const booking = found;
   if (!booking) {
     return (
       <p className="text-muted">
@@ -139,11 +139,13 @@ export default function BookingPage({ id }: { id: string }): ReactElement {
     );
   }
 
-  const room =
-    friendListings.find((listing) => listing.id === booking.listingId) ??
-    myListings.find((listing) => listing.id === booking.listingId) ??
-    tripListings.find((listing) => listing.id === booking.listingId);
-  const title = room?.title || "A place";
+  // A stay in one room names it ahead of the place it is in.
+  const title = room
+    ? stayRoom
+      ? `${stayRoom.name} · ${room.title}`
+      : room.title
+    : "A place";
+  const cover = stayRoom?.photos[0] ?? room?.photos[0];
   const address = room?.location.label || "Address unavailable";
   const iAmGuest = booking.guestId === user?.uid;
   const iAmHost = booking.ownerId === user?.uid;
@@ -160,10 +162,7 @@ export default function BookingPage({ id }: { id: string }): ReactElement {
   const PlaceIcon = room ? listingTypeIcon(room.type) : LuMapPin;
   // A round 40px crop of a room is barely a picture.
   const hero = (
-    <CoverPhoto
-      photo={room?.photos[0]}
-      className="aspect-[16/9] max-h-56 w-full"
-    />
+    <CoverPhoto photo={cover} className="aspect-[16/9] max-h-56 w-full" />
   );
   // Every row in this card leads with an icon, so dropping it for the place
   // alone left the title out of line with the rows beneath.
@@ -234,7 +233,7 @@ export default function BookingPage({ id }: { id: string }): ReactElement {
           the state is about that stay and the image is what the stay IS. The
           header keeps only the sentence. Without one it all falls back to the
           header, which is where it used to live. */}
-      {room?.photos[0] ? (
+      {cover ? (
         <div className="relative">
           {hero}
           <span className="absolute left-3 top-3 flex items-center gap-2">
@@ -249,7 +248,7 @@ export default function BookingPage({ id }: { id: string }): ReactElement {
       ) : null}
 
       <div className="flex flex-col items-center gap-3 text-center">
-        {room?.photos[0] ? null : (
+        {cover ? null : (
           <>
             <span
               className={`grid h-16 w-16 place-items-center rounded-full ${moment.circle}`}

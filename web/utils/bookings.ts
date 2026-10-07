@@ -21,7 +21,7 @@ import {
 } from "firebase/firestore";
 import { db, onSnapshotError } from "./firebase";
 import { isExpired } from "./format";
-import type { AvailabilityWindow, Booking, Listing } from "./types";
+import type { AvailabilityWindow, Booking, BookingVia, Listing } from "./types";
 
 function epoch(value: unknown): number {
   return value instanceof Timestamp ? value.toMillis() : 0;
@@ -41,6 +41,7 @@ function toBooking(snap: QueryDocumentSnapshot<DocumentData>): Booking {
     cancelledBy: data.cancelledBy ?? null,
     cancelReason: data.cancelReason ?? null,
     hiddenBy: data.hiddenBy ?? [],
+    via: data.via ?? null,
     createdAt: epoch(data.createdAt),
   };
 }
@@ -199,8 +200,12 @@ function lodge(
   ownerId: string,
   listingId: string,
   window: Slot,
+  via: BookingVia | null,
 ): Promise<unknown> {
   return addDoc(collection(db(), "bookings"), {
+    // Absent rather than null for every other link, so those asks are written
+    // exactly as they always were.
+    ...(via ? { via } : {}),
     listingId,
     ownerId,
     guestId,
@@ -219,11 +224,15 @@ function lodge(
 // dates asked for are the ones that were SHOWN, never whatever the slot says
 // now — a host who shifted them while the visitor was deciding has not been
 // agreed with.
+//
+// `via` must be "ROOM" when the page was opened from a room link, and null for
+// every other scope: the rules check a room link on its own, and only when told.
 export async function requestStayViaPortal(
   guestId: string,
   ownerId: string,
   listingId: string,
   window: Slot,
+  via: BookingVia | null = null,
 ): Promise<void> {
   const slot = await getDoc(
     doc(db(), "listings", listingId, "windows", window.id),
@@ -236,7 +245,7 @@ export async function requestStayViaPortal(
   );
   if (verdict) throw new SlotGone(verdict);
 
-  await lodge(guestId, ownerId, listingId, window);
+  await lodge(guestId, ownerId, listingId, window, via);
 }
 
 // A denial is the answer, not an error, so the caller can ask and act on the

@@ -445,6 +445,342 @@ expect(
   String(kept).slice(0, 160),
 );
 
+console.log("\na house with rooms lists them, and says what each set of dates offers");
+// Per run: the emulator keeps its data, and this section ADDS dates, so a fixed
+// id would find the ones an earlier run left and clash with them.
+const HOUSE = `host-check-house-${Date.now()}`;
+const roomFields = (name, note, order) => ({
+  mapValue: {
+    fields: {
+      name: str(name),
+      note: str(note),
+      photos: { arrayValue: {} },
+      publicPortalId: { nullValue: null },
+      order: int(order),
+    },
+  },
+});
+await put(`listings/${HOUSE}`, {
+  ownerId: str(uid),
+  title: str("The tested house"),
+  location: {
+    mapValue: {
+      fields: {
+        label: str("Lisbon"),
+        lat: { doubleValue: 38.7223 },
+        lng: { doubleValue: -9.1393 },
+        geohash: str("eycs0p"),
+      },
+    },
+  },
+  type: str("HOUSE"),
+  description: str("A house"),
+  photos: { arrayValue: {} },
+  rooms: {
+    mapValue: {
+      fields: {
+        "room-back": roomFields("Back bedroom", "Ground floor", 0),
+        "room-attic": roomFields("Attic room", "", 1),
+        "room-garden": roomFields("Garden studio", "", 2),
+      },
+    },
+  },
+  createdAt: ts("2026-08-01T00:00:00Z"),
+});
+const houseWindow = (start, end, roomId, extra = {}) => ({
+  start: str(`${year}-${start}`),
+  end: str(`${year}-${end}`),
+  status: str("OPEN"),
+  bookingId: { nullValue: null },
+  autoAccept: { booleanValue: false },
+  details: str(""),
+  roomId: roomId ? str(roomId) : { nullValue: null },
+  publicPortalId: { nullValue: null },
+  createdAt: int(0),
+  ...extra,
+});
+// Seeded attic-first, so the order on screen is the sort's doing and not the
+// order the documents happened to arrive in.
+await put(`listings/${HOUSE}/windows/a-attic`, houseWindow("11-06", "11-09", "room-attic"));
+await put(`listings/${HOUSE}/windows/b-back`, houseWindow("11-06", "11-09", "room-back"));
+await put(`listings/${HOUSE}/windows/c-whole`, houseWindow("11-20", "11-29", null));
+await put(
+  `listings/${HOUSE}/windows/d-back-taken`,
+  houseWindow("10-09", "10-12", "room-back", {
+    status: str("BOOKED"),
+    bookingId: str(`${HOUSE}-stay`),
+  }),
+);
+const houseBooking = (windowId, start, end, status) => ({
+  listingId: str(HOUSE),
+  ownerId: str(uid),
+  guestId: str("guest-early"),
+  windowId: str(windowId),
+  start: str(`${year}-${start}`),
+  end: str(`${year}-${end}`),
+  status: str(status),
+  cancelledBy: { nullValue: null },
+  cancelReason: { nullValue: null },
+  hiddenBy: { arrayValue: {} },
+  createdAt: int(1000),
+});
+await put(`bookings/${HOUSE}-stay`, houseBooking("d-back-taken", "10-09", "10-12", "CONFIRMED"));
+await put(`bookings/${HOUSE}-ask`, houseBooking("b-back", "11-06", "11-09", "REQUESTED"));
+
+async function read(path) {
+  const response = await fetch(`${DOCS}/${path}`, { headers: { Authorization: "Bearer owner" } });
+  return response.ok ? response.json() : null;
+}
+async function houseWindows() {
+  return (await read(`listings/${HOUSE}/windows`))?.documents ?? [];
+}
+
+// Helpers the page-side snippets share: find a control by its words, type into
+// a field the way React hears it, and read whichever sheet is on top.
+const IN_PAGE = `
+  const nap = (ms) => new Promise(r => setTimeout(r, ms));
+  const type = (el, v) => {
+    const set = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+    set.call(el, v); el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  const top = () => [...document.querySelectorAll("[role=dialog]")].at(-1);
+  const named = (root, words) => [...root.querySelectorAll("button")]
+    .find(b => (b.getAttribute("aria-label") || b.innerText || "").trim() === words);
+  const shut = async () => {
+    while (top()) {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      await nap(400);
+    }
+  };
+`;
+
+await page.go(`${APP}/#/room/${HOUSE}`, 9000);
+const house = JSON.parse(
+  await page.evaluate(`
+(async () => {
+  ${IN_PAGE}
+  for (let i = 0; i < 20; i++) {
+    if (/Garden studio/.test(document.body.innerText)) break;
+    await nap(500);
+  }
+  const rows = [...document.querySelectorAll("button")]
+    .filter(b => /nights/.test(b.innerText || ""))
+    .map(b => b.innerText.replace(/\\n+/g, " | "));
+  return JSON.stringify({ text: document.body.innerText, rows });
+})()
+`),
+);
+if (page.thrown.length)
+  console.log("  threw:", page.thrown.splice(0).join("\n         ").slice(0, 1200));
+const flat = house.text.replace(/\n+/g, " | ");
+// The chip is upper-cased by CSS, and innerText reports it as drawn.
+expect("the type chip counts the rooms", /house · 3 rooms/i.test(house.text), flat.slice(0, 200));
+expect(
+  "the rooms are listed in order",
+  house.text.indexOf("Back bedroom") > -1 &&
+    house.text.indexOf("Back bedroom") < house.text.indexOf("Attic room") &&
+    house.text.indexOf("Attic room") < house.text.indexOf("Garden studio"),
+  flat.slice(0, 300),
+);
+expect(
+  "each set of dates says what it offers",
+  house.rows.some((row) => /Nov 20/.test(row) && /Whole house/.test(row)) &&
+    house.rows.some((row) => /Nov 6/.test(row) && /Attic room/.test(row)) &&
+    house.rows.some((row) => /Oct 9/.test(row) && /Back bedroom/.test(row) && /Booked/.test(row)),
+  house.rows.join(" || "),
+);
+// By start date, then in the Rooms list's order — so two rooms offering the
+// same nights sit together, the same way round every time.
+const nov6 = house.rows.filter((row) => /Nov 6/.test(row));
+expect(
+  "same dates sort by room order",
+  nov6.length === 2 && /Back bedroom/.test(nov6[0]) && /Attic room/.test(nov6[1]),
+  nov6.join(" || "),
+);
+expect(
+  "a guest's row names the room",
+  /Back bedroom · Oct 9/.test(house.text) && /Back bedroom · Nov 6/.test(house.text),
+  flat.slice(-400),
+);
+
+console.log("\nadd dates starts on every room, and adds one set for each");
+const adding = JSON.parse(
+  await page.evaluate(`
+(async () => {
+  ${IN_PAGE}
+  named(document, "Add dates").click();
+  await nap(1200);
+  const sheet = top();
+  if (!sheet) return JSON.stringify({ error: "no sheet" });
+  const ticks = [...sheet.querySelectorAll("[role=checkbox]")]
+    .map(b => b.innerText.replace(/\\n+/g, " ") + "=" + b.getAttribute("aria-checked"));
+  const before = sheet.innerText;
+  const [from, to] = sheet.querySelectorAll("input[type=date]");
+  type(from, "${year}-12-04");
+  type(to, "${year}-12-07");
+  await nap(600);
+  const add = [...sheet.querySelectorAll("button")].filter(b => b.innerText.trim() === "Add dates").at(-1);
+  const disabled = add.disabled;
+  add.click();
+  await nap(3500);
+  return JSON.stringify({ ticks, before, disabled, stillOpen: Boolean(top()) });
+})()
+`),
+);
+expect(
+  "every room starts ticked",
+  adding.ticks?.length === 3 && adding.ticks.every((tick) => tick.endsWith("=true")),
+  JSON.stringify(adding).slice(0, 300),
+);
+expect(
+  "there is no every-room row",
+  !/Every room/.test(adding.before ?? ""),
+  String(adding.before).replace(/\n+/g, " | ").slice(0, 200),
+);
+expect(
+  "the caption counts the sets",
+  String(adding.before).includes("Adds 3 sets of dates, one for each room."),
+  String(adding.before).replace(/\n+/g, " | ").slice(0, 300),
+);
+expect("the sheet closes once added", adding.disabled === false && adding.stillOpen === false, JSON.stringify(adding).slice(-80));
+const added = (await houseWindows()).filter((doc) => doc.fields.start.stringValue === `${year}-12-04`);
+expect(
+  "one set of dates per room reached the database",
+  added.length === 3 &&
+    new Set(added.map((doc) => doc.fields.roomId?.stringValue)).size === 3 &&
+    added.every((doc) => doc.fields.roomId?.stringValue?.startsWith("room-")),
+  JSON.stringify(added.map((doc) => doc.fields.roomId)).slice(0, 200),
+);
+
+console.log("\nthe whole house can't be free on nights a room has its own dates");
+const clash = JSON.parse(
+  await page.evaluate(`
+(async () => {
+  ${IN_PAGE}
+  named(document, "Add dates").click();
+  await nap(1200);
+  const sheet = top();
+  if (!sheet) return JSON.stringify({ error: "no sheet" });
+  named(sheet, "Whole house").click();
+  await nap(300);
+  const boxes = sheet.querySelectorAll("[role=checkbox]").length;
+  const [from, to] = sheet.querySelectorAll("input[type=date]");
+  type(from, "${year}-11-04");
+  type(to, "${year}-11-08");
+  await nap(600);
+  const add = [...sheet.querySelectorAll("button")].filter(b => b.innerText.trim() === "Add dates").at(-1);
+  const out = { boxes, text: sheet.innerText, disabled: add.disabled };
+  await shut();
+  return JSON.stringify(out);
+})()
+`),
+);
+expect("choosing the whole house hides the rooms", clash.boxes === 0, JSON.stringify(clash).slice(0, 120));
+expect(
+  "the clash names the room and says why",
+  String(clash.text).includes("Overlaps the Back bedroom's Nov 6 – Nov 9 dates. The whole house can't be free while a room has its own dates."),
+  String(clash.text).replace(/\n+/g, " | ").slice(-260),
+);
+expect("and the dates can't be added", clash.disabled === true, String(clash.disabled));
+
+console.log("\nadd dates from one room's sheet ticks only that room");
+const fromRoom = JSON.parse(
+  await page.evaluate(`
+(async () => {
+  ${IN_PAGE}
+  named(document, "Attic room").click();
+  await nap(1200);
+  const room = top();
+  if (!room) return JSON.stringify({ error: "no room sheet" });
+  const roomText = room.innerText;
+  named(room, "Add dates").click();
+  await nap(1200);
+  const sheet = top();
+  const ticks = [...sheet.querySelectorAll("[role=checkbox]")]
+    .map(b => b.innerText.replace(/\\n+/g, " ") + "=" + b.getAttribute("aria-checked"));
+  const text = sheet.innerText;
+  await shut();
+  return JSON.stringify({ roomText, ticks, text });
+})()
+`),
+);
+expect(
+  "the room sheet offers its link, dates and removal",
+  ["Share this room", "Create link for this room", "Add dates", "Remove room"].every((words) =>
+    String(fromRoom.roomText).includes(words),
+  ),
+  String(fromRoom.roomText).replace(/\n+/g, " | ").slice(0, 300),
+);
+expect(
+  "only that room is ticked",
+  fromRoom.ticks?.filter((tick) => tick.endsWith("=true")).join() === "Attic room=true",
+  JSON.stringify(fromRoom.ticks),
+);
+expect(
+  "and the caption says one set",
+  String(fromRoom.text).includes("Adds 1 set of dates."),
+  String(fromRoom.text).replace(/\n+/g, " | ").slice(0, 300),
+);
+
+console.log("\nremoving a room says what it cancels, then cancels it");
+const removing = JSON.parse(
+  await page.evaluate(`
+(async () => {
+  ${IN_PAGE}
+  named(document, "Back bedroom").click();
+  await nap(1200);
+  const room = top();
+  if (!room) return JSON.stringify({ error: "no room sheet" });
+  named(room, "Remove room").click();
+  await nap(1200);
+  const ask = top();
+  const text = ask.innerText;
+  const confirm = [...ask.querySelectorAll("button")].filter(b => b.innerText.trim() === "Remove room").at(-1);
+  confirm.click();
+  await nap(5000);
+  return JSON.stringify({ text, open: Boolean(top()), body: document.body.innerText });
+})()
+`),
+);
+if (page.thrown.length)
+  console.log("  threw:", page.thrown.splice(0).join("\n         ").slice(0, 1200));
+expect(
+  "the confirm counts the stays and asks",
+  String(removing.text).includes("It cancels 1 upcoming stay and 1 ask"),
+  String(removing.text).replace(/\n+/g, " | ").slice(0, 300),
+);
+expect(
+  "the room leaves the page",
+  removing.open === false && /house · 2 rooms/i.test(String(removing.body)),
+  String(removing.body).replace(/\n+/g, " | ").slice(0, 200),
+);
+const after = await read(`listings/${HOUSE}`);
+expect(
+  "the room is gone from the place",
+  after && !("room-back" in (after.fields.rooms?.mapValue?.fields ?? {})) &&
+    "room-attic" in (after.fields.rooms?.mapValue?.fields ?? {}),
+  JSON.stringify(after?.fields?.rooms).slice(0, 200),
+);
+const left = await houseWindows();
+expect(
+  "its dates went with it, and nobody else's",
+  !left.some((doc) => doc.fields.roomId?.stringValue === "room-back") &&
+    left.some((doc) => doc.fields.roomId?.stringValue === "room-attic") &&
+    left.some((doc) => doc.name.endsWith("/c-whole")),
+  left.map((doc) => doc.name.split("/").pop()).join(),
+);
+for (const id of [`${HOUSE}-stay`, `${HOUSE}-ask`]) {
+  const booking = await read(`bookings/${id}`);
+  expect(
+    `${id.endsWith("stay") ? "the stay" : "the ask"} is cancelled as the host's doing`,
+    booking?.fields?.status?.stringValue === "CANCELLED" &&
+      booking?.fields?.cancelledBy?.stringValue === uid &&
+      booking?.fields?.cancelReason?.stringValue === "SLOT_CANCELLED",
+    JSON.stringify(booking?.fields?.status),
+  );
+}
+
 if (failures.length) {
   console.log(`\n${failures.length} failed`);
   process.exit(1);

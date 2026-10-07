@@ -1,7 +1,11 @@
 "use client";
 
 import { type ReactElement, useEffect, useRef, useState } from "react";
-import { type ListingInput, newListingId } from "../utils/listings";
+import {
+  type ListingInput,
+  type NewRoom,
+  newListingId,
+} from "../utils/listings";
 import { deleteListingPhoto } from "../utils/photos";
 import { useKip } from "../utils/store";
 import type { ListingPhoto } from "../utils/types";
@@ -31,10 +35,16 @@ export default function ListingFormScreen({
   // Held, not re-minted per render: photos upload against it before submit.
   const [draftId] = useState(newListingId);
   const [draftPhotos, setDraftPhotos] = useState<readonly ListingPhoto[]>([]);
+  // Rooms drawn up alongside a new place, created with it. Their photos are
+  // already uploaded under the same draft id, so they are abandoned with it too.
+  const [draftRooms, setDraftRooms] = useState<readonly NewRoom[]>([]);
   // Read by the abandon cleanup, which must not re-run as either changes.
   const created = useRef(false);
   const uploaded = useRef<readonly ListingPhoto[]>([]);
-  uploaded.current = draftPhotos;
+  uploaded.current = [
+    ...draftPhotos,
+    ...draftRooms.flatMap((room) => room.photos),
+  ];
 
   // Leaving without submitting strands whatever was uploaded, and nothing else
   // will ever collect it. A closed tab still leaks, which is owner-only and
@@ -64,7 +74,7 @@ export default function ListingFormScreen({
       await updateListing(id, input);
       back();
     } else {
-      await createListing(draftId, input, draftPhotos);
+      await createListing(draftId, input, draftPhotos, draftRooms);
       created.current = true;
       replace({ kind: "room", id: draftId });
     }
@@ -76,6 +86,26 @@ export default function ListingFormScreen({
       ownerId={user.uid}
       listingId={initial?.id ?? draftId}
       photos={initial?.photos ?? draftPhotos}
+      draftRooms={draftRooms}
+      onDraftRoom={(room) =>
+        setDraftRooms((current) =>
+          current.some((candidate) => candidate.id === room.id)
+            ? current.map((candidate) =>
+                candidate.id === room.id ? room : candidate,
+              )
+            : [...current, room],
+        )
+      }
+      onDropDraftRoom={(room) => {
+        setDraftRooms((current) =>
+          current.filter((candidate) => candidate.id !== room.id),
+        );
+        for (const photo of room.photos) {
+          deleteListingPhoto(user.uid, draftId, photo.id).catch((error) =>
+            console.warn("dropped room photo", error),
+          );
+        }
+      }}
       onSubmit={submit}
       onPhotos={
         id

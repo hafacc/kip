@@ -3,7 +3,8 @@
 import type { ReactElement } from "react";
 import { LuMapPin, LuZap } from "react-icons/lu";
 import { formatDateRange, isExpired } from "../utils/format";
-import { listingTypeLabel } from "../utils/listings";
+import { placeTypeLabel } from "../utils/listings";
+import { offerLabel, roomList } from "../utils/rooms";
 import { useKip } from "../utils/store";
 import type { AvailabilityWindow, Listing } from "../utils/types";
 import Avatar from "./avatar";
@@ -34,6 +35,7 @@ export default function PlaceCard({
     .filter((window) => window.status === "OPEN" && !isExpired(window.end))
     .sort((left, right) => left.start.localeCompare(right.start));
   const hasInstant = open.some((window) => window.autoAccept);
+  const roomCount = roomList(listing).length;
 
   return (
     <article className="relative rounded-3xl bg-surface p-4 shadow-card transition hover:shadow-panel">
@@ -71,7 +73,7 @@ export default function PlaceCard({
             </button>
           ) : null}
           <Chip tone="type" className="ml-auto">
-            {listingTypeLabel(listing.type)}
+            {placeTypeLabel(listing.type, roomCount)}
           </Chip>
         </div>
 
@@ -97,6 +99,9 @@ export default function PlaceCard({
               </span>
               <span className="truncate text-xs text-muted">
                 next {formatDateRange(open[0].start, open[0].end)}
+                {roomCount > 0
+                  ? ` · ${offerLabel(listing, open[0].roomId)}`
+                  : ""}
               </span>
             </span>
           )}

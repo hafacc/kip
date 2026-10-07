@@ -1,14 +1,22 @@
 "use client";
 
 import { type ReactElement, useState } from "react";
-import { LuLoaderCircle, LuMapPin } from "react-icons/lu";
+import { LuLoaderCircle, LuMapPin, LuPlus } from "react-icons/lu";
 import { type GeocodeResult, geocodeMatches } from "../utils/geocode";
-import type { ListingInput } from "../utils/listings";
+import {
+  type ListingInput,
+  type NewRoom,
+  RoomsNotAllowedError,
+} from "../utils/listings";
+import { canHaveRooms, roomList, wholePlaceLabel } from "../utils/rooms";
 import type { Listing, ListingPhoto, ListingType } from "../utils/types";
 import PhotoStrip from "./photo-strip";
+import { DraftRoomSheet, RoomSheet } from "./room-sheet";
+import { RoomRow } from "./rooms";
 import Button from "./ui/button";
 import FieldNote from "./ui/field-note";
 import Input from "./ui/input";
+import { Group } from "./ui/list";
 import Segmented from "./ui/segmented";
 
 type GeoState = "idle" | "searching" | "found" | "notfound";
@@ -19,6 +27,9 @@ type GeoState = "idle" | "searching" | "found" | "notfound";
 const TEXTAREA =
   "w-full rounded-xl border border-border bg-surface px-3.5 text-base outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20";
 
+const ROOMS_BLOCK_TYPE =
+  "Remove this place's rooms before changing it to a room.";
+
 // The listing editor, laid out as a full-screen stacked screen. The parent
 // (ListingFormScreen) wires submit/cancel to the nav stack.
 export default function ListingForm({
@@ -26,15 +37,23 @@ export default function ListingForm({
   ownerId,
   listingId,
   photos,
+  draftRooms,
   onSubmit,
   onPhotos,
+  onDraftRoom,
+  onDropDraftRoom,
 }: {
   initial?: Listing;
   ownerId: string;
   listingId: string;
   photos: readonly ListingPhoto[];
+  // The rooms of a place not yet created. An existing place's are read off
+  // `initial` and edited in place, since they already exist.
+  draftRooms: readonly NewRoom[];
   onSubmit: (input: ListingInput) => Promise<void>;
   onPhotos: (photos: ListingPhoto[]) => Promise<void>;
+  onDraftRoom: (room: NewRoom) => void;
+  onDropDraftRoom: (room: NewRoom) => void;
 }): ReactElement {
   const [title, setTitle] = useState(initial?.title ?? "");
   const [type, setType] = useState<ListingType>(initial?.type ?? "ROOM");
@@ -52,6 +71,19 @@ export default function ListingForm({
   const [matches, setMatches] = useState<GeocodeResult[]>([]);
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
+  // `roomId` null is the sheet that adds one.
+  const [openRoom, setOpenRoom] = useState<{ roomId: string | null } | null>(
+    null,
+  );
+  const [typeRefused, setTypeRefused] = useState(false);
+  const rooms: readonly NewRoom[] = initial ? roomList(initial) : draftRooms;
+
+  function chooseType(next: ListingType): void {
+    // Refused here rather than at Save, where the reason would arrive late.
+    const refused = !canHaveRooms(next) && rooms.length > 0;
+    setTypeRefused(refused);
+    if (!refused) setType(next);
+  }
 
   async function lookup(): Promise<void> {
     if (!label.trim()) return;
@@ -89,6 +121,10 @@ export default function ListingForm({
           lng: resolved?.lng ?? 0,
         },
       });
+    } catch (error) {
+      // A room added in another tab since this form opened.
+      if (error instanceof RoomsNotAllowedError) setTypeRefused(true);
+      else throw error;
     } finally {
       setBusy(false);
     }
@@ -114,13 +150,16 @@ export default function ListingForm({
         <Segmented
           ariaLabel="Place type"
           value={type}
-          onChange={setType}
+          onChange={chooseType}
           options={[
             { value: "ROOM", label: "Room" },
             { value: "FLAT", label: "Flat" },
             { value: "HOUSE", label: "House" },
           ]}
         />
+        {typeRefused ? (
+          <FieldNote tone="danger">{ROOMS_BLOCK_TYPE}</FieldNote>
+        ) : null}
       </div>
 
       <label className="flex flex-col gap-1.5 text-sm text-muted">
@@ -215,6 +254,35 @@ export default function ListingForm({
         />
       </div>
 
+      {canHaveRooms(type) ? (
+        <div className="flex flex-col gap-1.5">
+          <span className="text-sm text-muted">Rooms</span>
+          <Group>
+            {rooms.map((room) => (
+              <RoomRow
+                key={room.id}
+                name={room.name}
+                note={room.note}
+                photos={room.photos}
+                onOpen={() => setOpenRoom({ roomId: room.id })}
+              />
+            ))}
+            <button
+              type="button"
+              onClick={() => setOpenRoom({ roomId: null })}
+              className="flex min-h-14 w-full items-center gap-3 px-4 py-3 text-left text-[0.9375rem] font-semibold text-accent-ink transition-colors hover:bg-surface-hover"
+            >
+              <LuPlus size={18} />
+              Add a room
+            </button>
+          </Group>
+          <FieldNote>
+            Rooms are optional. Add them if friends can stay in one without
+            taking the {wholePlaceLabel(type).toLowerCase()}.
+          </FieldNote>
+        </div>
+      ) : null}
+
       <Button
         size="lg"
         onClick={submit}
@@ -228,6 +296,25 @@ export default function ListingForm({
           Waiting for photos to finish uploading…
         </p>
       ) : null}
+
+      {!openRoom ? null : initial ? (
+        <RoomSheet
+          key={openRoom.roomId ?? "new"}
+          listing={initial}
+          roomId={openRoom.roomId}
+          onClose={() => setOpenRoom(null)}
+        />
+      ) : (
+        <DraftRoomSheet
+          key={openRoom.roomId ?? "new"}
+          ownerId={ownerId}
+          listingId={listingId}
+          room={rooms.find((room) => room.id === openRoom.roomId) ?? null}
+          onSave={onDraftRoom}
+          onRemove={onDropDraftRoom}
+          onClose={() => setOpenRoom(null)}
+        />
+      )}
     </div>
   );
 }

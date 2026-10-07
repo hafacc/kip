@@ -19,6 +19,7 @@ import {
 } from "firebase/firestore";
 import { db } from "./firebase";
 import { isExpired } from "./format";
+import { roomList, roomOf, toPortalRoom, toRooms } from "./rooms";
 import type {
   AvailabilityWindow,
   Listing,
@@ -27,6 +28,8 @@ import type {
   Portal,
   PortalContent,
   PortalListing,
+  PortalRoom,
+  PortalRoomShell,
   PortalWindow,
 } from "./types";
 
@@ -42,16 +45,25 @@ function toPortal(snap: QueryDocumentSnapshot<DocumentData>): Portal {
     ownerId: data.ownerId,
     ownerName: data.ownerName ?? "",
     ownerPhotoURL: data.ownerPhotoURL ?? null,
-    listings: data.listings ?? [],
+    // A shell copied before rooms existed carries none.
+    listings: ((data.listings ?? []) as PortalListing[]).map((entry) => ({
+      ...entry,
+      rooms: entry.rooms ?? [],
+    })),
+    listingId: data.listingId ?? null,
+    roomId: data.roomId ?? null,
+    room: (data.room as PortalRoomShell | undefined) ?? null,
     createdAt: epoch(data.createdAt),
   };
 }
 
 // `windowIds` pins a SLOT link to the one range it covers; the dates themselves
-// are never copied.
+// are never copied. `room` is the one those dates offer, so the page can say
+// which — a slot grant reads the dates but not the listing that names its rooms.
 function toPortalListing(
   listing: Listing,
   windowIds: readonly string[] | null,
+  room: PortalRoom | null,
 ): PortalListing {
   return {
     listingId: listing.id,
@@ -60,7 +72,28 @@ function toPortalListing(
     description: listing.description,
     locationLabel: listing.location.label,
     photos: [...listing.photos],
+    rooms: room ? [room] : [],
     windowIds: windowIds ? [...windowIds] : null,
+  };
+}
+
+function slotRoom(
+  listing: Listing,
+  window: AvailabilityWindow | undefined,
+): PortalRoom | null {
+  const room = roomOf(listing, window?.roomId ?? null);
+  return room ? toPortalRoom(room) : null;
+}
+
+function toRoomShell(listing: Listing, roomId: string): PortalRoomShell {
+  const room = roomOf(listing, roomId);
+  return {
+    name: room?.name ?? "",
+    note: room?.note ?? "",
+    photos: [...(room?.photos ?? [])],
+    houseTitle: listing.title,
+    houseType: listing.type,
+    locationLabel: listing.location.label,
   };
 }
 
@@ -119,7 +152,9 @@ export async function publishSlotPortal(
   // this a shared date range couldn't say which place it belongs to.
   batch.set(doc(db(), "portals", id), {
     ...portalBase("SLOT", owner),
-    listings: [toPortalListing(listing, [window.id])],
+    listings: [
+      toPortalListing(listing, [window.id], slotRoom(listing, window)),
+    ],
   });
   batch.update(doc(db(), "listings", listing.id, "windows", window.id), {
     publicPortalId: id,
@@ -137,6 +172,52 @@ export async function revokeSlotPortal(
   batch.delete(doc(db(), "portals", portalId));
   batch.update(doc(db(), "listings", listingId, "windows", windowId), {
     publicPortalId: null,
+  });
+  await batch.commit();
+}
+
+/**
+ * Share one room: its name, note, photos and open dates, and nothing else of
+ * the place.
+ *
+ * Mints a new link and kills the room's previous one in the same commit, so
+ * calling it again is how a link is regenerated. The room's details are copied
+ * onto the link — it deliberately does not unlock the listing, which holds the
+ * other rooms — and {@link propagateListing} keeps that copy current. See
+ * {@link revokeRoomPortal}.
+ */
+export async function publishRoomPortal(
+  listing: Listing,
+  roomId: string,
+  owner: Party,
+): Promise<string> {
+  const id = crypto.randomUUID();
+  const previous = roomOf(listing, roomId)?.publicPortalId ?? null;
+  const batch = writeBatch(db());
+  if (previous) batch.delete(doc(db(), "portals", previous));
+  batch.set(doc(db(), "portals", id), {
+    ...portalBase("ROOM", owner),
+    listingId: listing.id,
+    roomId,
+    room: toRoomShell(listing, roomId),
+  });
+  batch.update(doc(db(), "listings", listing.id), {
+    [`rooms.${roomId}.publicPortalId`]: id,
+  });
+  await batch.commit();
+  return id;
+}
+
+/** Turn a room's link off; every copy of it stops working at once. */
+export async function revokeRoomPortal(
+  listingId: string,
+  roomId: string,
+  portalId: string,
+): Promise<void> {
+  const batch = writeBatch(db());
+  batch.delete(doc(db(), "portals", portalId));
+  batch.update(doc(db(), "listings", listingId), {
+    [`rooms.${roomId}.publicPortalId`]: null,
   });
   await batch.commit();
 }
@@ -181,6 +262,9 @@ export function ownedPortalIds(
   const ids = profilePortalId ? [profilePortalId] : [];
   for (const listing of listings) {
     if (listing.publicPortalId) ids.push(listing.publicPortalId);
+    for (const room of Object.values(listing.rooms)) {
+      if (room.publicPortalId) ids.push(room.publicPortalId);
+    }
     for (const window of windowsByListing[listing.id] ?? []) {
       // An expired slot's link stays live so it can still be revoked, but nobody
       // will book it, so it isn't worth rewriting on every rename.
@@ -215,29 +299,49 @@ export async function propagateProfile(
   await batch.commit();
 }
 
-// Slot links only — they're the one kind carrying a copy. The others read live.
+// Slot and room links only — they're the two kinds carrying a copy. The others
+// read live. Pass the listing as it now stands, after an edit to the place or
+// to any of its rooms.
 export async function propagateListing(
   listing: Listing,
   windows: readonly AvailabilityWindow[],
 ): Promise<void> {
-  const targets = windows
-    .map((window) => window.publicPortalId)
-    .filter((id): id is string => Boolean(id));
-  if (targets.length === 0) return;
-
-  const snaps = await Promise.all(
-    targets.map((id) => getDoc(doc(db(), "portals", id))),
+  const slots = windows.filter((window) => Boolean(window.publicPortalId));
+  const rooms = roomList(listing).filter((room) =>
+    Boolean(room.publicPortalId),
   );
+  if (slots.length === 0 && rooms.length === 0) return;
+
+  const [slotSnaps, roomSnaps] = await Promise.all([
+    Promise.all(
+      slots.map((window) =>
+        getDoc(doc(db(), "portals", window.publicPortalId ?? "")),
+      ),
+    ),
+    Promise.all(
+      rooms.map((room) =>
+        getDoc(doc(db(), "portals", room.publicPortalId ?? "")),
+      ),
+    ),
+  ]);
   const batch = writeBatch(db());
-  snaps.forEach((snap, index) => {
+  slotSnaps.forEach((snap, index) => {
     if (!snap.exists()) return;
     const current: PortalListing[] = snap.data().listings ?? [];
     const next = current.map((entry) =>
       entry.listingId === listing.id
-        ? toPortalListing(listing, entry.windowIds)
+        ? toPortalListing(
+            listing,
+            entry.windowIds,
+            slotRoom(listing, slots[index]),
+          )
         : entry,
     );
-    batch.update(doc(db(), "portals", targets[index]), { listings: next });
+    batch.update(snap.ref, { listings: next });
+  });
+  roomSnaps.forEach((snap, index) => {
+    if (!snap.exists()) return;
+    batch.update(snap.ref, { room: toRoomShell(listing, rooms[index].id) });
   });
   await batch.commit();
 }
@@ -261,8 +365,9 @@ function grantExpiry(): Date {
   return expires;
 }
 
-// Rooms are read live for USER and LISTING scope and copied for SLOT; free dates
-// are always live. `signIn` is taken in flight so the anonymous sign-in overlaps
+// Rooms are read live for USER and LISTING scope and copied for SLOT and ROOM;
+// free dates are always live. A ROOM link yields one listing holding its one
+// room, with only that room's dates. `signIn` is taken in flight so the anonymous sign-in overlaps
 // the portal read — the portal doc needs no identity, being readable by id.
 // `onOwner` fires when the portal doc lands — a round trip before the rooms and
 // two before the dates — so the page has something honest to draw that early.
@@ -302,16 +407,23 @@ export async function fetchPortalPage(
   const portal = found;
   const data = snap.data() ?? {};
 
-  const listings: PortalListing[] = portal.listings.length
-    ? [...portal.listings]
-    : await readLiveListings(portal, data.listingId ?? null);
+  const roomListing = roomLinkListing(portal);
+  const listings: PortalListing[] = roomListing
+    ? [roomListing]
+    : portal.listings.length
+      ? [...portal.listings]
+      : await readLiveListings(portal, data.listingId ?? null);
 
   const perListing = await Promise.all(
     listings.map(
       async (listing) =>
         [
           listing.listingId,
-          await readVisibleWindows(listing, held.get(listing.listingId)),
+          await readVisibleWindows(
+            listing,
+            held.get(listing.listingId),
+            roomListing ? portal.roomId : null,
+          ),
         ] as const,
     ),
   );
@@ -320,6 +432,36 @@ export async function fetchPortalPage(
     portal: { ...portal, listings },
     windows: Object.fromEntries(perListing),
   };
+}
+
+// The place's own description and photos stay out: a room link shows the room.
+function roomLinkListing(portal: Portal): PortalListing | null {
+  if (
+    portal.scope !== "ROOM" ||
+    !portal.listingId ||
+    !portal.roomId ||
+    !portal.room
+  ) {
+    return null;
+  } else {
+    return {
+      listingId: portal.listingId,
+      title: portal.room.houseTitle,
+      type: portal.room.houseType,
+      description: "",
+      locationLabel: portal.room.locationLabel,
+      photos: [],
+      rooms: [
+        {
+          id: portal.roomId,
+          name: portal.room.name,
+          note: portal.room.note,
+          photos: [...portal.room.photos],
+        },
+      ],
+      windowIds: null,
+    };
+  }
 }
 
 // A USER link names no rooms, so a room added later just appears.
@@ -349,6 +491,7 @@ async function readLiveListings(
         description: listing.description ?? "",
         locationLabel: listing.location?.label ?? "",
         photos: (listing.photos as ListingPhoto[]) ?? [],
+        rooms: roomList({ rooms: toRooms(listing.rooms) }).map(toPortalRoom),
         windowIds: null,
       };
     });
@@ -359,17 +502,24 @@ const EMPTY_HELD: ReadonlySet<string> = new Set();
 async function readVisibleWindows(
   listing: PortalListing,
   holding: ReadonlySet<string> = EMPTY_HELD,
+  onlyRoomId: string | null = null,
 ): Promise<PortalWindow[]> {
   const windowsRef = collection(db(), "listings", listing.listingId, "windows");
   const snaps = listing.windowIds
     ? await Promise.all(
         listing.windowIds.map((id) => getDoc(doc(windowsRef, id))),
       )
-    : await readOpenAndHeld(windowsRef, holding);
+    : await readOpenAndHeld(windowsRef, holding, onlyRoomId);
 
   return (
     snaps
       .filter((entry) => entry.exists())
+      // A stay the visitor holds elsewhere in the house is readable by id, and
+      // is not this room's.
+      .filter(
+        (entry) =>
+          onlyRoomId === null || (entry.data()?.roomId ?? null) === onlyRoomId,
+      )
       // A slot link still shows its own dates once past; wider links drop them
       // rather than offering a stranger last month.
       .filter(
@@ -383,6 +533,7 @@ async function readVisibleWindows(
           end: data.end ?? "",
           details: data.details ?? "",
           autoAccept: data.autoAccept === true,
+          roomId: data.roomId ?? null,
           booked: (data.status ?? "OPEN") !== "OPEN",
           bookedByMe: holding.has(entry.id),
         };
@@ -426,9 +577,17 @@ async function heldWindows(uid: string): Promise<Map<string, Set<string>>> {
 async function readOpenAndHeld(
   windowsRef: CollectionReference<DocumentData>,
   held: ReadonlySet<string>,
+  onlyRoomId: string | null,
 ): Promise<DocumentSnapshot<DocumentData>[]> {
+  // A room link's grant admits only that room's open dates, so the query has
+  // to name the room or one unreadable date sinks it.
+  const open = where("status", "==", "OPEN");
   const [free, mine] = await Promise.all([
-    getDocs(query(windowsRef, where("status", "==", "OPEN"))),
+    getDocs(
+      onlyRoomId === null
+        ? query(windowsRef, open)
+        : query(windowsRef, where("roomId", "==", onlyRoomId), open),
+    ),
     Promise.all([...held].map((id) => getDoc(doc(windowsRef, id)))),
   ]);
   // The two shouldn't overlap, but the rules only pin that on the guest's release

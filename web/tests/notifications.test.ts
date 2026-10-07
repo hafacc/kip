@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   ALL_OFF,
+  type BookingLike,
   asNotifyKind,
   dateRange,
   formIntent,
@@ -675,6 +676,136 @@ describe("what a text can carry", () => {
         expect(text).toContain(wordingOf(short[index]));
         expect(text).toContain(ORIGIN);
       });
+    }
+  });
+});
+
+// Dates can be one room's rather than the whole place's. The trigger reads the
+// name and passes it in; with none — the whole place, or dates or a room that
+// have since gone — every notice reads exactly as it did.
+describe("naming the room", () => {
+  const ORIGIN = "https://kip.hafa.cc";
+  const WHEN = "Aug 14 – Aug 19";
+  const bare = { ...booking, roomName: "Back bedroom" };
+  const placed = { ...bare, placeTitle: "Erik's house" };
+
+  function notices(inRoom: BookingLike): (Notice | null)[] {
+    const confirmed = { ...inRoom, status: "CONFIRMED" };
+    const cancelled = (by: string, reason: string) => ({
+      ...inRoom,
+      status: "CANCELLED",
+      cancelledBy: by,
+      cancelReason: reason,
+    });
+    return [
+      noticeForNewBooking(inRoom, BOOKING_ID),
+      noticeForNewBooking(confirmed, BOOKING_ID),
+      noticeForBookingChange(inRoom, confirmed, BOOKING_ID),
+      noticeForBookingChange(inRoom, cancelled("host", "SLOT_MOVED"), BOOKING_ID),
+      noticeForBookingChange(inRoom, cancelled("host", "DECLINED"), BOOKING_ID),
+      noticeForBookingChange(confirmed, cancelled("host", "STAY_CANCELLED"), BOOKING_ID),
+      noticeForBookingChange(confirmed, cancelled("guest", "STAY_CANCELLED"), BOOKING_ID),
+    ];
+  }
+
+  function bodies(inRoom: BookingLike): (string | undefined)[] {
+    return notices(inRoom).map((notice) => notice?.body);
+  }
+
+  function wording(stay: string): string[] {
+    return [
+      `Sam would like ${stay}. Open kip to confirm or decline.`,
+      `Sam took ${stay}. It auto-accepts, so it's already confirmed — nothing for you to do.`,
+      `You're all set for ${stay}.`,
+      `Maya moved the dates you asked about for ${stay}, so your request was cancelled. Open kip to see what's free now.`,
+      `Your request for ${stay} wasn't taken up.`,
+      `Maya can no longer host ${stay}.`,
+      `${stay} is free again.`,
+    ];
+  }
+
+  it("says which room and whose place", () => {
+    expect(bodies(placed)).toEqual(
+      wording(`Back bedroom at Erik's house (${WHEN})`),
+    );
+  });
+
+  it("says the room alone when the place has no title", () => {
+    for (const placeTitle of [undefined, "", "   "]) {
+      expect(bodies({ ...bare, placeTitle })).toEqual(
+        wording(`Back bedroom (${WHEN})`),
+      );
+    }
+  });
+
+  it("leaves every subject as it is for the whole place", () => {
+    const subjects = (stay: BookingLike) =>
+      notices(stay).map((notice) => notice?.subject);
+    expect(subjects(placed)).toEqual(subjects(booking));
+    expect(subjects(bare)).toEqual(subjects(booking));
+  });
+
+  it("carries both into the HTML and text parts of every notice", () => {
+    for (const notice of notices(placed)) {
+      expect(notice).not.toBeNull();
+      if (!notice) continue;
+      const email = renderEmail(notice, {
+        origin: ORIGIN,
+        photoCid: null,
+        unsubscribeUrl: `${ORIGIN}/unsubscribe`,
+      });
+      expect(email.text).toContain(`Back bedroom at Erik's house (${WHEN})`);
+      expect(email.html).toContain(
+        `Back bedroom at Erik&#39;s house (${WHEN})`,
+      );
+      expect(email.text).not.toContain("the Back bedroom");
+      expect(email.html).not.toContain("the Back bedroom");
+    }
+  });
+
+  it("reads as before with no room, or a blank one", () => {
+    for (const roomName of [undefined, "", "   "]) {
+      const plain = { ...booking, roomName, placeTitle: "Erik's house" };
+      expect(noticeForNewBooking(plain, BOOKING_ID)).toEqual(
+        noticeForNewBooking(booking, BOOKING_ID),
+      );
+      expect(
+        noticeForBookingChange(
+          { ...plain, status: "CONFIRMED" },
+          { ...plain, status: "CANCELLED", cancelledBy: "guest", cancelReason: "STAY_CANCELLED" },
+          BOOKING_ID,
+        )?.body,
+      ).toBe(`${WHEN} is free again.`);
+    }
+  });
+
+  // A subject is the whole text message, and a room's name is as long as its
+  // owner made it — so the room never reaches one.
+  it("never reaches a subject, so a text stays one segment", () => {
+    const long = {
+      ...booking,
+      roomName: "The enormous attic room ".repeat(12),
+      placeTitle: "A sprawling farmhouse ".repeat(12),
+    };
+    const confirmed = { ...long, status: "CONFIRMED" };
+    const gone = { ...long, status: "CANCELLED", cancelledBy: "host", cancelReason: "STAY_CANCELLED" };
+    const notices = [
+      noticeForNewBooking(long, BOOKING_ID),
+      noticeForNewBooking(confirmed, BOOKING_ID),
+      noticeForBookingChange(long, confirmed, BOOKING_ID),
+      noticeForBookingChange(long, { ...gone, cancelReason: "SLOT_MOVED" }, BOOKING_ID),
+      noticeForBookingChange(long, { ...gone, cancelReason: "DECLINED" }, BOOKING_ID),
+      noticeForBookingChange(confirmed, gone, BOOKING_ID),
+      noticeForBookingChange(confirmed, { ...gone, cancelledBy: "guest" }, BOOKING_ID),
+    ];
+    for (const notice of notices) {
+      expect(notice).not.toBeNull();
+      if (!notice) continue;
+      expect(notice.subject).not.toContain("attic");
+      expect(notice.subject).not.toContain("farmhouse");
+      expect(notice.body).toContain("attic");
+      expect(notice.body).toContain("farmhouse");
+      expect(segments(renderSms(notice, ORIGIN) ?? "")).toBe(1);
     }
   });
 });

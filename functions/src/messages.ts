@@ -51,6 +51,11 @@ export type BookingLike = {
   hostPhotoURL?: string | null;
   guestName?: string;
   guestPhotoURL?: string | null;
+  // The room the dates offer, when they are a room's and it still exists.
+  // Absent for the whole place, or once the dates or the room are gone.
+  roomName?: string;
+  // The title of the place that room is in. Only read beside a room's name.
+  placeTitle?: string;
   cancelledBy?: string | null;
   cancelReason?: string | null;
 };
@@ -123,6 +128,18 @@ export function firstName(name: string | undefined): string {
   return (name ?? "").split(" ")[0] || "Someone";
 }
 
+// Bodies only, never a subject: a subject is also the whole text message, and
+// a room's name is as long as its owner made it.
+function roomNamed(booking: BookingLike): string {
+  const room = (booking.roomName ?? "").trim();
+  const place = (booking.placeTitle ?? "").trim();
+  return room && place ? `${room} at ${place}` : room;
+}
+
+function stayIn(room: string, when: string): string {
+  return room ? `${room} (${when})` : when;
+}
+
 // Asking and instant-booking are separately switchable: one wants a decision,
 // the other is only news.
 export function noticeForNewBooking(
@@ -130,7 +147,10 @@ export function noticeForNewBooking(
   bookingId: string,
 ): Notice {
   const who = firstName(booking.guestName);
-  const when = dateRange(booking.start, booking.end);
+  const when = stayIn(
+    roomNamed(booking),
+    dateRange(booking.start, booking.end),
+  );
   // Whoever is asking; the host is the one reading.
   const person: Person = {
     name: booking.guestName || "Someone",
@@ -167,7 +187,9 @@ export function noticeForBookingChange(
 ): Notice | null {
   if (before.status === after.status) return null;
 
-  const when = dateRange(after.start, after.end);
+  const dates = dateRange(after.start, after.end);
+  const room = roomNamed(after);
+  const when = stayIn(room, dates);
   const host = firstName(after.hostName);
   const guest = firstName(after.guestName);
   const path = bookingPath(bookingId);
@@ -207,7 +229,7 @@ export function noticeForBookingChange(
         to: "guest",
         kind: "bookingDecision",
         subject: "Those dates changed",
-        body: `${host} moved the dates you asked about (${when}), so your request was cancelled. Open kip to see what's free now.`,
+        body: `${host} moved the dates you asked about${room ? ` for ${room}` : ""} (${dates}), so your request was cancelled. Open kip to see what's free now.`,
         path,
         cta: "See the request",
         person: theHost,
