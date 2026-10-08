@@ -570,7 +570,7 @@ async function houseWindows() {
 }
 
 // Helpers the page-side snippets share: find a control by its words, type into
-// a field the way React hears it, and read whichever sheet is on top.
+// a field the way the app hears it, and read whichever sheet is on top.
 const IN_PAGE = `
   const nap = (ms) => new Promise(r => setTimeout(r, ms));
   const type = (el, v) => {

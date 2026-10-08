@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { slotVerdict } from "../utils/bookings";
+import { slotVerdict } from "../src/lib/bookings";
 
 const WINDOW = { id: "w1", start: "2026-09-01", end: "2026-09-04" };
 const OPEN = {

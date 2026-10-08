@@ -5,15 +5,20 @@
   "license": "MIT",
   "type": "module",
   "engines": {
-    "bun": ">=1.3.0"
+    "bun": ">=1.4.0"
+  },
+  "imports": {
+    "#lib": "./src/lib",
+    "#lib/*": "./src/lib/*"
   },
   "scripts": {
-    "dev": "next dev --turbo",
-    "dev:emulated": "firebase emulators:exec --config ../firebase.json --only auth,firestore --project demo-kip 'NEXT_PUBLIC_AUTH_EMULATOR=1 next dev --turbo --port 3001'",
+    "prepare": "svelte-kit sync",
+    "dev": "vite dev",
+    "dev:emulated": "firebase emulators:exec --config ../firebase.json --only auth,firestore --project demo-kip 'VITE_AUTH_EMULATOR=1 vite dev --port 3001 --strictPort'",
     "check:portal": "node scripts/portal-check.mjs",
-    "export": "next build",
-    "fmt": "biome format --write",
-    "lint": "tsc && tsc --noEmit -p tsconfig.sw.json && biome check && tsc --noEmit -p ../functions",
+    "export": "vite build",
+    "fmt": "biome check --write",
+    "lint": "svelte-kit sync && svelte-check --fail-on-warnings && tsc --noEmit -p tsconfig.sw.json && biome check && tsc --noEmit -p ../functions",
     "test": "bun test --path-ignore-patterns '**/rules.test.ts'",
     "test:rules": "firebase emulators:exec --config ../firebase.json --only firestore,auth --project demo-kip-rules 'bun test tests/rules.test.ts'",
     "check:host": "node scripts/host-check.mjs",
@@ -27,27 +32,26 @@
     "admin": "bun run scripts/admin.ts",
     "build:sw": "tsc -p tsconfig.sw.json"
   },
-  "dependencies": {
-    "firebase": "^12.19.0",
-    "geofire-common": "^6.0.0",
-    "next": "^16.3.6",
-    "next-themes": "^0.4.6",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
-    "react-icons": "^5.7.0"
-  },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.14",
+    "@biomejs/biome": "^2.5.15",
     "@firebase/rules-unit-testing": "^5.0.2",
-    "@tailwindcss/postcss": "^4.3.3",
+    "@fontsource-variable/plus-jakarta-sans": "^5.3.0",
+    "@iconify-json/fa6-brands": "^1.2.6",
+    "@iconify-json/lucide": "^1.2.141",
+    "@sveltejs/adapter-static": "^4.0.0",
+    "@sveltejs/kit": "^3.0.1",
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/bun": "^1.4.2",
     "@types/node": "^26.6.3",
-    "@types/react": "^19.3.0",
-    "@types/react-dom": "^19.3.0",
-    "autoprefixer": "^10.6.1",
+    "firebase": "^12.19.0",
     "firebase-admin": "^14.5.0",
-    "postcss": "^8.5.28",
+    "geofire-common": "^6.0.0",
+    "svelte": "^5.57.2",
+    "svelte-check": "^4.7.6",
     "tailwindcss": "^4.3.3",
-    "typescript": "~7.0.2"
+    "typescript": "~6.0.3",
+    "unplugin-icons": "^24.0.0",
+    "vite": "^8.3.3"
   }
 }

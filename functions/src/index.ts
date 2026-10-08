@@ -60,7 +60,7 @@ const SENDER = "noreply@kip.hafa.cc";
 const RESEND_API_KEY = defineSecret("RESEND_API_KEY");
 
 // Empty, so SMS is off: `smsConfigured()` is checked before anything is read,
-// written or sent, the same shape `firebaseConfigured()` has on the web side.
+// written or sent.
 // Filling these in is not enough on its own — until the 10DLC campaign is
 // approved every US send is blocked with 30034 and billed anyway.
 //

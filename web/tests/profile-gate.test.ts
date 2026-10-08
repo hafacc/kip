@@ -6,7 +6,7 @@ import {
   gateStep,
   NO_SESSION,
   attempt,
-} from "../utils/profile-gate";
+} from "../src/lib/profile-gate";
 
 const UID = "uid-a";
 const OTHER = "uid-b";
@@ -94,7 +94,7 @@ describe("profile gate", () => {
   });
 
   test("never open and unreachable at once", () => {
-    // Page.tsx renders Unreachable only behind a shut gate, so an open gate
+    // The app page renders Unreachable only behind a shut gate, so an open gate
     // carrying the flag would silently never show it.
     const events: GateEvent[] = [
       attach,

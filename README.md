@@ -13,7 +13,7 @@ one at the point of asking.
 
 Live at <https://kip.hafa.cc>.
 
-Responsive web client (Next.js, static export) synced via Firestore. Native mobile apps come later.
+Responsive web client (SvelteKit, static export) synced via Firestore. Native mobile apps come later.
 
 ## Running locally
 
@@ -26,8 +26,7 @@ bun dev
 The repo ships a populated dev Firebase config (`hafaio-kip-dev`), so `bun dev` gives you the real
 sign-in flow out of the box — an emailed one-time link, a texted code, or Google. kip has no
 password anywhere. To point at your own project, replace the `firebaseConfig` in
-`web/utils/firebase.ts` (see [CLAUDE.md](./CLAUDE.md) for the full setup walkthrough). Blanking its
-`appId` disables sign-in for a config-free build.
+`web/src/lib/firebase.ts` (see [CLAUDE.md](./CLAUDE.md) for the full setup walkthrough).
 
 ## License
 

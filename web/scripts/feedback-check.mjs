@@ -71,7 +71,7 @@ async function browser() {
   await new Promise((r) => (ws.onopen = r));
   let id = 0;
   const waiting = new Map();
-  // `app/error.tsx` paints over a render throw, so the stack survives only in
+  // `+error.svelte` paints over a render throw, so the stack survives only in
   // these page-level events.
   const thrown = [];
   ws.onmessage = (event) => {
