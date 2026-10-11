@@ -383,7 +383,7 @@
     {#if checkingOut.length > 0}
       <Section title="Checking out">
         <div class="flex flex-col gap-4 rounded-3xl bg-surface p-4 shadow-card">
-          {#each checkingOut as part (part.label ?? "")}
+          {#each checkingOut as part, index (index)}
             <div class="flex flex-col gap-1">
               {#if part.label}
                 <h3 class="text-sm font-semibold text-muted">{part.label}</h3>

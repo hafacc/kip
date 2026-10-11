@@ -736,11 +736,6 @@ test("a host sees who asked, manages rooms, and writes check-out instructions", 
   });
 
   await test.step("a guest reads them on a confirmed stay", async () => {
-    // The app claims the guest's pointer off their trips. Until it lands the
-    // place cannot be read, and a page loaded before then names no room.
-    await expect
-      .poll(() => firestore.exists(`listings/${house}/guests/${guestUid}`))
-      .toBe(true);
     await load(guest, `${APP_ORIGIN}/#/booking/${stay}`);
     const section = guest.locator("section").filter({
       has: guest.getByRole("heading", { name: "Checking out", exact: true }),

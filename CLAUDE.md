@@ -2022,13 +2022,14 @@ outright** (`room-detail.svelte` reads `listing.location.label`). Unreachable in
 path sets one — so this is a note about FIXTURES, not a bug: seed the field, or spend the time
 reading a stack trace for a state that cannot exist.
 
-The guest half needs one ordering the app does not give it for free: **wait for the guest pointer
-to land before opening the booking**. The store claims `listings/{id}/guests/{uid}` and fetches
-the listing in two independent effects, and a fetch that loses that race is refused and never
-retried, so the page names "A place" with no room. Opened in that state it also crashed outright:
-`booking-page.svelte` keys the check-out parts on their label, both labels are null while the room
-name is unknown, and Svelte throws `each_key_duplicate`. A real guest whose stay is confirmed while
-kip is open can hit both; the test sidesteps them by polling for the pointer.
+The guest half found two bugs, both fixed, and it opens the booking without waiting for anything
+so that they stay fixed. The store claims `listings/{id}/guests/{uid}` and fetches the listing in
+two independent effects, and a fetch that lost that race was refused and never retried, so the
+page named "A place" with no room; each claim that lands now asks again for whatever is still
+missing (`claimsLanded`). Opened in that state the page also crashed outright:
+`booking-page.svelte` keyed the check-out parts on their label, both labels are null while the room
+name is unknown, and Svelte throws `each_key_duplicate`. They are keyed by position now. A real
+guest whose stay was confirmed while kip was open could hit both.
 
 ## Driving the teardown
 
@@ -2108,9 +2109,10 @@ runs under the emulated dev server, like the other browser checks.
 One trap it teaches: an inert `Sheet`'s title sits in the DOM on every screen, so asking "is the
 name form up?" by searching `innerText` answers yes when nothing is showing. Assert on the control
 that is actually there. And one it found: once the profile is gone, keeping the account opens the
-name sheet, and `NameGate` declines to OPEN for a deletion but does not close a sheet already up —
-so a deletion arriving after that (from another device, say) sits under it. The test dispatches
-its click past the sheet rather than asserting the overlap away.
+name sheet, and `NameGate` declined to OPEN for a deletion but did not close a sheet already up —
+so a deletion arriving after that (from another device, say) sat under it. `NameGate` now closes
+its sheet when a deletion appears, however it was opened, unless a submit is in flight, and the
+test clicks the deletion screen's button the ordinary way, which fails if anything covers it.
 
 Two things it teaches. Both emulators namespace under the id `emulators:exec` was STARTED with, and
 so does the function's Admin SDK (`GCLOUD_PROJECT`) — seed `demo-kip`, not the client's project, or

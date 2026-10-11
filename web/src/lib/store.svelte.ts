@@ -234,6 +234,8 @@ let stateUid: string | null = null;
 // Once per stay per page load; the rules can't see the booking as CONFIRMED
 // inside either confirm commit.
 let claimedStays = new Set<string>();
+// Bumped as each guest pointer lands, so a place refused before its pointer existed is asked for again.
+let claimsLanded = $state(0);
 // Each browse fetch takes a ticket, and only the newest may land: an older one
 // finishing late would otherwise overwrite a newer friend set, or fill in the
 // last session's places after a sign-out.
@@ -1308,12 +1310,18 @@ export function startKip(): void {
   });
 
   $effect(() => {
+    void claimsLanded;
     if (!user || !missingListingsKey) return;
     Promise.all(missingListingsKey.split(",").map(fetchListing))
       .then((found) => {
         const listings = found.filter((listing) => listing !== null);
         if (listings.length > 0) {
-          tripListings = [...tripListings, ...listings];
+          // Two runs can overlap and both find the same place.
+          const ids = new Set(listings.map((listing) => listing.id));
+          tripListings = [
+            ...tripListings.filter((listing) => !ids.has(listing.id)),
+            ...listings,
+          ];
         }
       })
       .catch((error) => console.error("fetchListing", error));
@@ -1325,9 +1333,11 @@ export function startKip(): void {
     for (const pair of unclaimedStaysKey.split(",")) {
       const [bookingId, listingId] = pair.split(":");
       claimedStays.add(bookingId);
-      claimGuestAccess(listingId, current.uid, bookingId).catch((error) =>
-        console.error("claimGuestAccess", error),
-      );
+      claimGuestAccess(listingId, current.uid, bookingId)
+        .then(() => {
+          claimsLanded += 1;
+        })
+        .catch((error) => console.error("claimGuestAccess", error));
     }
   });
 
