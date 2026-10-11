@@ -5,7 +5,13 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
-import { afterAll, beforeAll, beforeEach, describe, it } from "bun:test";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe as bunDescribe,
+  it,
+} from "bun:test";
 import {
   addDoc,
   collection,
@@ -25,7 +31,11 @@ import {
 
 // Rules tests for the public-portal / friendship flow. Run via the Firestore
 // emulator: `firebase emulators:exec --only firestore --project demo-kip-rules
-// "cd web && bun test tests/rules.test.ts"` (see package.json `test:rules`).
+// "cd web && bun test tests/rules.test.ts"` (see package.json `rules`). Without the
+// emulator the whole file is skipped, so a plain `bun test` passes.
+
+const emulated = Boolean(process.env.FIRESTORE_EMULATOR_HOST);
+const describe = emulated ? bunDescribe : bunDescribe.skip;
 
 let testEnv: RulesTestEnvironment;
 
@@ -148,24 +158,26 @@ const request = {
   createdAt: 0,
 };
 
-beforeAll(async () => {
-  testEnv = await initializeTestEnvironment({
-    projectId: "demo-kip-rules",
-    firestore: {
-      rules: readFileSync("../firebase/firestore.rules", "utf8"),
-      host: "127.0.0.1",
-      port: 8080,
-    },
+if (emulated) {
+  beforeAll(async () => {
+    testEnv = await initializeTestEnvironment({
+      projectId: "demo-kip-rules",
+      firestore: {
+        rules: readFileSync("../firebase/firestore.rules", "utf8"),
+        host: "127.0.0.1",
+        port: 8080,
+      },
+    });
   });
-});
 
-afterAll(async () => {
-  await testEnv.cleanup();
-});
+  afterAll(async () => {
+    await testEnv.cleanup();
+  });
 
-beforeEach(async () => {
-  await testEnv.clearFirestore();
-});
+  beforeEach(async () => {
+    await testEnv.clearFirestore();
+  });
+}
 
 describe("portals", () => {
   it("owner can create their own portal", async () => {

@@ -9,5 +9,5 @@
     "types": ["$app/types", "bun", "node", "unplugin-icons/types/svelte"],
     "strict": true
   },
-  "include": ["src", "scripts/**/*.ts", "tests/**/*.ts", "*.ts"]
+  "include": ["src", "scripts/**/*.ts", "tests/**/*.ts", "e2e/**/*.ts", "*.ts"]
 }
