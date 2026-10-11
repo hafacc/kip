@@ -9,7 +9,7 @@
     "node": "22"
   },
   "scripts": {
-    "build": "tsc",
+    "export": "tsc",
     "lint": "tsc --noEmit",
     "deploy": "firebase deploy --only functions"
   },

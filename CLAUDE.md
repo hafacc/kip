@@ -1112,7 +1112,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   no display name, which is exactly what an account is once the profile phase lands — so it asked
   the person who had just left what to call them, over the screen saying they were leaving, and sat
   on top of these controls. It stands down for a deletion now. Both are driven by
-  `bun run check:leave`. A Storage sweep that fails is logged and does NOT block: every object is named by
+  `bun e2e leave`. A Storage sweep that fails is logged and does NOT block: every object is named by
   uid, so a later sweep can always finish it, while a bucket refusing us would otherwise strand
   someone who asked to leave.
 
@@ -1208,7 +1208,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   happens to contain the button that opened it. Mounted rather than moved, because a sheet that moved
   its own node there could not be closed by its parent removing it. **Only ≥md could show it** — the mobile header carries
   no blur — which is exactly why phone-width screenshots of the feedback sheet looked right while it
-  was broken, and why `check:feedback` measures the backdrop against the viewport at 1280 wide. `Segmented` (tonal pill track, active
+  was broken, and why the feedback e2e test measures the backdrop against the viewport at 1280 wide. `Segmented` (tonal pill track, active
   = white thumb) and `Switch` (labeled track/thumb, ON = gradient) round out the set. Lists use
   `Group` (a `rounded-3xl bg-surface shadow-card` with near-invisible `divide-y` — the **shadow is
   the separator**, no outer border) + `Row` (`min-h-14`) + `Section`/`SectionHeading` — flat grouped
@@ -1363,7 +1363,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   dialog, and it can afford to: what it destroys is a copy of something already read, not somebody
   else's stay or their place.
 
-  **The role is a claim on the ACCOUNT, not a row in a table.** `bun run admin <email>` sets a
+  **The role is a claim on the ACCOUNT, not a row in a table.** `bun admin <email>` sets a
   custom claim through the Admin SDK, which is the only thing that can — so the role cannot be
   granted from inside the app by anyone, its holder included, and a compromised session cannot
   appoint itself. Being an account property rather than data pays three ways: `isAdmin()` costs no
@@ -1376,18 +1376,18 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
 
   **The cost is that a claim reaches a live session only on its next token**, which Firebase
   refreshes hourly — so granting the role and seeing it are separated by a sign-out and back in.
-  The script says so, and `check:feedback` does exactly that rather than pretending a reload is
+  The script says so, and the feedback e2e test does exactly that rather than pretending a reload is
   enough.
 
   **The fragment is guessable and that is fine.** `#/feedback` renders for anybody; every read
   behind it is refused, so what a stranger gets is "Couldn't load these" and no reports, which
-  `check:feedback` asserts rather than assumes.
+  the feedback e2e test asserts rather than assumes.
 
   **The menu is `w-56` and every row is `whitespace-nowrap`, and both are load-bearing.** At `w-48`
   "Feedback inbox" had exactly ZERO pixels of slack — it fit only while font metrics agreed to the
   pixel, and in a real browser it wrapped, growing that one row a head taller than its neighbours
   and centring its label among left-aligned ones. Headless renders the same text a shade narrower,
-  so the wrap itself cannot be reproduced there; `check:feedback` measures the SLACK instead and
+  so the wrap itself cannot be reproduced there; the feedback e2e test measures the SLACK instead and
   requires 16px, which is 0 at the old width and 27 at the new one. Pinning the margin rather than
   the symptom is what makes it catch the next label somebody adds.
 
@@ -1403,7 +1403,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   who guessed `#/feedback` and was refused every report — clearing a dot for reports they had never
   been shown, which for the operator meant arriving at a full inbox with nothing marked new. It is
   now inside the load's success path and gated on `admin`, so a refused or failed load leaves the
-  mark alone: nothing was read. Found by `check:feedback`, which walks exactly that order.
+  mark alone: nothing was read. Found by the feedback e2e test, which walks exactly that order.
 
   **The screen names nobody, and shows no identifier either.** A report carries a uid, but the
   `users` read rule is self, friend or searchable — widening it for this would hand one session read
@@ -1413,7 +1413,7 @@ Rules: [firebase/firestore.rules](./firebase/firestore.rules), [firebase/storage
   asking, and eight characters of hex earn no room on screen for it. The gate is the point — you
   need an account to send one — not who sent it, so the inbox reads anonymously.
 
-  The uid is still STORED, which is what keeps a spammer identifiable and lets `bun run feedback`
+  The uid is still STORED, which is what keeps a spammer identifiable and lets `bun feedback`
   name them by asking Auth (GCP credentials, not a session). So this is anonymous on screen, not in
   the database, and the privacy page says the account id is kept.
 
@@ -1722,7 +1722,7 @@ of the function rather than an edge case. A canvas with no 2d context, and a sou
 an untouched photo were exactly the two that delivered its GPS tag, silently, while the privacy
 page said otherwise. A refused upload is the lesser harm, and it says so in its own words: the two
 callers (`photo-strip.svelte`, `profile-photo.svelte`) tell a `PhotoEncodeError` from a network failure,
-because nothing about this one gets better on a retry. Proved in `check:exif`, below.
+because nothing about this one gets better on a retry. Proved by `bun e2e:exif`, below.
 
 It then mints the download URL once, at upload, and returns it to be stored. `src/lib/components/photo-strip.svelte` is the editable strip (owner view of RoomPage
 and the listing form; drag or the per-thumbnail arrows reorder, and the first photo is the cover),
@@ -1789,7 +1789,7 @@ it arrives writes a portal capability and a one-time sign-in code into Cache Sto
 expiry, is readable by any same-origin script, and outlives the revocation meant to kill them. The
 key is the PATH alone, forced to a trailing slash to match `trailingSlash = "always"` — and the response
 is stored as a fresh `Response` with no URL on it, since a cloned response carries the URL it came
-from, query and all, into Cache Storage. `check:pwa` opens `/portal/#token` and
+from, query and all, into Cache Storage. `bun e2e:pwa` opens `/portal/#token` and
 `/continue/?oobCode=…` and asserts neither reaches a cache key.
 
 **The entry point is pre-cached and everything else is bounded.** Registration is deferred to `load`,
@@ -1828,18 +1828,20 @@ Safari fires no such event at all, so on an iPhone the row explains Share → Ad
 instead of offering a button that cannot work, and iPads are found by their Macintosh user agent
 plus a touchscreen. Installed already, neither shows.
 
-`bun run check:pwa` builds and serves at the ROOT, because that is what production is.
-`KIP_PWA_BASE=/kip bun run check:pwa` runs the same checks built and served under a path, since
+`bun e2e:pwa` builds and serves at the ROOT, because that is what production is.
+`KIP_PWA_BASE=/kip bun e2e:pwa` runs the same checks built and served under a path, since
 manifest scope, the registration path and the offline key are all built from the base path and
 nothing else exercises that support now the release has stopped using it. It
 asserts Chrome's own verdict — that it fires `beforeinstallprompt` at all — that no capability
 reaches a cache key, and then **kills the server** and checks kip still renders. That last part
-matters: the first version emulated offline through CDP, which does not apply to the fetches a
-service worker makes, so it watched the shell render over the live network and credited the cache.
-It passed with the entire offline fallback deleted. It does not cover a signed-in kip offline: that
+matters: the first version only emulated offline, which does not apply to the fetches a service
+worker makes, so it watched the shell render over the live network and credited the cache. It
+passed with the entire offline fallback deleted. It does not cover a signed-in kip offline: that
 is Firestore's persistence, which needs a real session. Its static server listens with a backlog of
 128, because the build boots by fetching some thirty small modules at once and the default queue of
-5 reset the connections that didn't fit.
+5 reset the connections that didn't fit. It runs in a persistent Chrome profile rather than
+Playwright's usual context, because those are incognito and Chrome never offers to install from
+one.
 
 The export it builds talks to the REAL project, so the check fails every Firebase Auth request in
 the browser and asserts the share link's anonymous sign-up was attempted and blocked: without that,
@@ -1866,7 +1868,7 @@ TypeScript is held at `~6.0.3`, because TypeScript 7 breaks `svelte-kit sync` an
 ## Cloud Functions
 
 `functions/` (Node 22, npm — NOT bun; it targets the Cloud Functions runtime). `cd functions && npm
-install`, `npm run build`, `firebase deploy --only functions`.
+install`, `npm run export`, `firebase deploy --only functions`.
 
 It exports eight functions doing four jobs, and each job had to argue for itself, because
 everything user-facing — share links included — runs on rules alone. **Notification email** (the
@@ -1925,26 +1927,37 @@ falling back to a plain sign-in free rather than a second SMS.
 
 ## Driving the share link
 
-`bun run check:portal` seeds a USER-scope portal into the emulator, opens it in headless Chrome and
-asserts what a visitor actually sees AND what it leaves behind: the link resolves, the host and
-room render, the ask opens the identity sheet, submitting it sends a `REQUESTED` booking — never a
-confirmed one, since a link is not friendship — carrying the dates that were shown, and the guest's
-profile ends up holding the name they typed. A booking carries no name by design, so the two are
-checked separately; that split IS the `knownBy` design, asserted. It also pins two things about the
-form itself: a phone number typed while the field reads Email is accepted — the mode sets the
-keyboard, never the verdict — and Google stands BELOW the submit after the divider, since it
-authenticates first and takes the name from the account rather than the form. It exits non-zero on the
-first failure, so it reads like a test even though it cannot gate CI — it needs a browser and a
-running dev server:
+The browser checks are Playwright tests in `web/e2e/`, driving the system Chrome (`channel:
+"chrome"`, so nothing is downloaded) against the emulators. `bun e2e` runs every one that needs the emulated
+app, and `bun e2e portal` (or any other file name) runs one. Its config,
+`e2e/playwright.config.ts`, starts `bun dev:emulated` itself and stops it afterwards, or reuses one
+already serving on 3001, so it needs the same JRE. Whatever answers on that port is reused, so
+`e2e/emulated.ts` runs first and refuses unless the page it gets is the emulated app and both
+emulators answer: a plain `bun dev --port 3001` talks to the real project, and the first share link
+a check opened there would create an anonymous account in production. `bun e2e:exif` and `bun e2e:pwa` need no
+emulator and run from `e2e/standalone.config.ts`.
 
 ```sh
-cd web && bun run dev:emulated      # one shell, serves on 3001
-bun run check:portal                # another
+cd web && bun e2e portal
 ```
+
+`e2e/app/portal.e2e.ts` seeds a USER-scope portal into the emulator, opens it and asserts what a
+visitor actually sees AND what it leaves behind: the link resolves, the host and room render, the
+ask opens the identity sheet, submitting it sends a `REQUESTED` booking — never a confirmed one,
+since a link is not friendship — carrying the dates that were shown, and the guest's profile ends
+up holding the name they typed. A booking carries no name by design, so the two are checked
+separately; that split IS the `knownBy` design, asserted. It also pins two things about the form
+itself: a phone number typed while the field reads Email is accepted — the mode sets the keyboard,
+never the verdict — and Google stands BELOW the submit after the divider, since it authenticates
+first and takes the name from the account rather than the form. That needs a fresh visitor: one
+who already has a name is never shown the field. None of it can gate CI, since it needs a browser
+and a running dev server.
 
 It serves on **3001**, with `--strictPort`, so an emulated server can never quietly answer for the
 ordinary `bun dev` on 3000 — the two would be indistinguishable in a browser and the emulated one
-has an empty database. Both the script and the check are pinned to it; `KIP_ORIGIN` still overrides.
+has an empty database. `KIP_ORIGIN` overrides the origin the tests open and the one Playwright
+waits on, but the command it starts still serves 3001, so a server anywhere else has to be up
+already.
 
 Run it after touching the portal page, the identity sheet, or `src/lib/auth.ts`. Everything this path
 has broken — a link that resolved for nobody, a code step that swallowed a wrong code, a returning
@@ -1972,13 +1985,17 @@ will not load. Ask the emulator instead: `POST
 
 **And attach to the browser's exceptions from OUTSIDE the page.** `src/routes/+error.svelte` catches a render
 throw and paints "This page couldn't load" over it, so an in-page `console.error` hook installed
-after navigation sees nothing — the stack survives only in CDP's own `Runtime.exceptionThrown` and
-`Runtime.consoleAPICalled` events. Both checks now collect those and print them before their
-assertions run, so a crash reports its cause rather than its symptom.
+after navigation sees nothing — the stack survives only in the page's own `pageerror` and console
+events. The shared `test` in `e2e/fixtures.ts` collects those from every page and attaches them to
+a failing result, so a crash reports its cause rather than its symptom.
+
+**A fragment change is not a load.** Every route here is a fragment, so going from one link or
+screen to another leaves the last one's sheets and state standing. Where a check needs a clean
+page it goes through `about:blank` first (`load` in `e2e/fixtures.ts`).
 
 ## Driving the host's side
 
-`bun run check:host` is the other half of the same booking: `check:portal` is a visitor asking,
+`bun e2e host` is the other half of the same booking: the portal test is a visitor asking,
 this is the person being asked. It signs a host in through the **email door** — the Auth emulator
 publishes the link it would have mailed, which is what makes it unattended — seeds a place with one
 slot and two asks against it, and then asserts what the host sees: a **count on the row** in
@@ -1986,8 +2003,7 @@ Availability, both askers **named inside the slot**, oldest first, sitting **abo
 and the open slot **named in the URL**.
 
 ```sh
-cd web && bun run dev:emulated      # one shell, serves on 3001
-bun run check:host                  # another
+cd web && bun e2e host
 ```
 
 Then it books the slot out from under those asks and checks the losers are still listed BELOW the
@@ -2006,9 +2022,17 @@ outright** (`room-detail.svelte` reads `listing.location.label`). Unreachable in
 path sets one — so this is a note about FIXTURES, not a bug: seed the field, or spend the time
 reading a stack trace for a state that cannot exist.
 
+The guest half needs one ordering the app does not give it for free: **wait for the guest pointer
+to land before opening the booking**. The store claims `listings/{id}/guests/{uid}` and fetches
+the listing in two independent effects, and a fetch that loses that race is refused and never
+retried, so the page names "A place" with no room. Opened in that state it also crashed outright:
+`booking-page.svelte` keys the check-out parts on their label, both labels are null while the room
+name is unknown, and Svelte throws `each_key_duplicate`. A real guest whose stay is confirmed while
+kip is open can hit both; the test sidesteps them by polling for the pointer.
+
 ## Driving the teardown
 
-`bun run check:teardown` is the only thing here that watches a TRIGGER run, and the teardown is the
+`bun e2e:teardown` is the only thing here that watches a TRIGGER run, and the teardown is the
 one path whose whole claim is about what happens when the browser is gone — so reasoning about it
 was never going to be enough. It builds the functions, starts Firestore, Auth and Functions, seeds
 an account with everything a real one has attached (stays on both sides, a place with slots and
@@ -2016,23 +2040,23 @@ share links, a past visit, friends, requests both ways, a saved search, a `known
 `deletions/{uid}` exactly as the client does, and then walks away and waits:
 
 ```sh
-cd web && bun run check:teardown
+cd web && bun e2e:teardown
 ```
 
 It asserts the phases were reported on the way, the document deleted itself, the Auth account is
 gone, and — the half that is about other people — that the host whose slot the leaver held has their
 nights back, both sides of the friendship went, and **a stay that already happened is left alone**.
-Unlike the browser checks it needs no browser and no dev server, so it is the one that could
-gate CI if that is ever wanted.
+Unlike the browser checks it needs no browser and no dev server, so it is a plain `bun test`
+(`e2e/teardown.test.ts`, skipped without the emulators) under its own `emulators:exec` with
+Functions, and it is the one that could gate CI if that is ever wanted.
 
 ## Driving feedback
 
-`bun run check:feedback` is the only thing that can see either half of feedback working: somebody
+`bun e2e feedback` is the only thing that can see either half of feedback working: somebody
 sending one, and the operator reading and clearing them.
 
 ```sh
-cd web && bun run dev:emulated      # one shell, serves on 3001
-bun run check:feedback              # another
+cd web && bun e2e feedback
 ```
 
 It signs someone in through the email door, opens the menu and asserts they are offered **Send
@@ -2047,7 +2071,8 @@ Two traps it teaches. Navigating to a FRAGMENT does not reload the page, so a me
 its rows stays open over every screen after it — and its own rows then land in every `innerText`
 the check reads. And the emulator keeps its data for as long as it is up, so a report left behind
 by a failed run matches a generic assertion: each one here matches a per-run nonce, which is what
-caught this check passing once while nothing had been sent.
+caught this check passing once while nothing had been sent. It also clears the collection first,
+since the unread marks it counts are over every report there.
 
 Every one of those passes lint, the unit suite and the rules suite while broken. The rules suite
 proves who MAY read the collection; only a browser proves the menu row appears for the right person,
@@ -2056,15 +2081,15 @@ into the sheet lands at all.
 
 ## Driving the EXIF promise
 
-`bun run check:exif` bundles the real `shrink` and runs it in headless Chrome against a JPEG this
-script builds — Chrome writes the pixels, the script splices in an EXIF APP1 carrying a GPS IFD and
+`bun e2e:exif` bundles the real `shrink` and runs it in headless Chrome against a JPEG the
+test builds — Chrome writes the pixels, `e2e/exif.ts` splices in an EXIF APP1 carrying a GPS IFD and
 a findable string, the way a camera does — then asserts the output has no APP1 segment anywhere in
 its structure and neither string anywhere in its bytes. It ends by stubbing `getContext` and
 `toBlob` to fail and checking both refuse rather than return the original. No dev server, no
 emulator, ~10 seconds:
 
 ```sh
-cd web && bun run check:exif
+cd web && bun e2e:exif
 ```
 
 **It has to be a browser, and that is not a shortcut.** The promise rests on Chrome's own canvas
@@ -2073,16 +2098,19 @@ actually upload through — it could pass while the shipped path leaked. The scr
 bundles lives under `node_modules/.cache` so that `firebase/…` resolves and neither tsc nor biome
 ever sees it.
 
-`bun run check:leave` is the other half: the person watching. It signs someone in through the email
+`bun e2e leave` is the other half: the person watching. It signs someone in through the email
 door, plants the deletion document, and checks the app stands aside for it live, then again on a
 RELOAD with the profile already deleted — the state that used to read as onboarding, which is the
 whole reason the screen sits ahead of the profile gate. Then it removes the document the way a
 finished trigger does and checks the session ends rather than dropping them into a nameless kip. It
-needs the emulated dev server, like the other two browser checks.
+runs under the emulated dev server, like the other browser checks.
 
 One trap it teaches: an inert `Sheet`'s title sits in the DOM on every screen, so asking "is the
 name form up?" by searching `innerText` answers yes when nothing is showing. Assert on the control
-that is actually there.
+that is actually there. And one it found: once the profile is gone, keeping the account opens the
+name sheet, and `NameGate` declines to OPEN for a deletion but does not close a sheet already up —
+so a deletion arriving after that (from another device, say) sits under it. The test dispatches
+its click past the sheet rather than asserting the overlap away.
 
 Two things it teaches. Both emulators namespace under the id `emulators:exec` was STARTED with, and
 so does the function's Admin SDK (`GCLOUD_PROJECT`) — seed `demo-kip`, not the client's project, or
@@ -2092,13 +2120,12 @@ non-blocking path working as designed, and the run passing THROUGH it is itself 
 
 ## Driving a change of number
 
-`bun run check:consent` is the only check that can see a consent record at all: it signs someone in
+`bun e2e consent` is the only check that can see a consent record at all: it signs someone in
 through the email door, then works the phone door and the Texts switch in Settings, reading the
 stored prefs document back after every step.
 
 ```sh
-cd web && bun run dev:emulated      # one shell, serves on 3001
-bun run check:consent               # another
+cd web && bun e2e consent
 ```
 
 Five states, each of which passes lint, the unit suite and the rules suite while broken: an account
@@ -2116,23 +2143,21 @@ consent when pressed anyway, says why on the row rather than sitting greyed out 
 still lists the kinds a text cannot carry. Provision a number and the five states run as written.
 It reads the constant out of `src/lib/sms.ts` rather than being told, so the two cannot disagree.
 
-It also pins that **a full code submits itself** — `check:consent` is the only check that types
-one. The code goes in and nothing is clicked; the assertion is that the sheet has gone anyway.
-Setting the whole value in one event is what a paste looks like too, so that covers both.
+It also pins that **a full code submits itself** — the consent test is the only check that types
+one. The code is PASTED, separator and all (`keyboard.insertText`, a real paste rather than a
+`fill`), and nothing is clicked; the assertion is that the sheet has gone anyway, with no digit
+lost to a `maxLength` truncating the paste.
 
-Two traps it teaches, both of which cost a run here. The emulator keeps its **Auth accounts** for as
+One trap it teaches, which cost a run here. The emulator keeps its **Auth accounts** for as
 long as it is up, so a fixed test number belongs to the previous run's account by the second run and
 adding it signs you INTO that account — a real product path, arriving as a run that quietly drives
-somebody else's data. Use a fresh number per run. And a headless Chrome left behind by a failed run
-holds both the debugging port and the **signed-in session**, so the next run attaches to it and never
-sees a sign-in form; the check kills its own profile's browser first, and `pkill -f` needs a pattern
-with no leading dashes or it matches nothing while looking like it worked.
+somebody else's data. Use a fresh number per run.
 
 ## Security-rules tests
 
 `firestore.rules` is the only enforcement, so the security-critical paths are tested against the
-Firestore emulator with `@firebase/rules-unit-testing`: `cd web && bun run test:rules` (the suite
-lives in `web/tests/rules.test.ts`; plain `bun test` won't run it).
+Firestore emulator with `@firebase/rules-unit-testing`: `cd web && bun rules` (the suite
+lives in `web/tests/rules.test.ts`; plain `bun test` skips it).
 
 The emulator needs a **JRE** — if `java` isn't on PATH, point it at one first, e.g.
 `export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"` and prepend
@@ -2298,14 +2323,11 @@ an API on, holding `serviceUsageConsumer` rather than `serviceUsageAdmin`, so
 an API being enabled by an owner once is a smaller standing power than a deploy principal that can
 enable any of them.
 
-`bun run test` runs everything that needs no emulator: plain `bun test` with the rules suite
-excluded by path, since that one does. It was an ALLOWLIST of filenames, and that list was copied
-into `ci.yml` as well — where it then stayed behind, so `search` and `reattach` were written, passed
-locally, and never once ran in CI. One exclusion beats four inclusions: a new suite is now picked up
-by both without editing either. `ci.yml` runs the script rather than its own copy for the same
-reason. Note the exclusion has to be the `--path-ignore-patterns` FLAG and not a `bunfig.toml`
-`[test]` entry — bunfig's version also wins over an explicitly named file, which makes `test:rules`
-match nothing at all. The suites: the notification
+`bun test` runs every suite. The rules suite skips itself unless the Firestore emulator's
+`FIRESTORE_EMULATOR_HOST` is set, which `bun rules` (`firebase emulators:exec`) sets, so one
+command works with and without the emulator and CI runs both. It used to be excluded by a
+`--path-ignore-patterns` flag in a `test` script; a `bunfig.toml` entry cannot do that job, since
+it also wins over an explicitly named file and makes the rules run match nothing at all. The suites: the notification
 decisions above; the re-attach decision (`decideReattach`, see Known limitations); the profile-gate
 decision (`gateStep`, when the gate opens, shuts and gives up — see the store bullet); the
 saved-search arithmetic (`countNewSince` ignoring slots written before
