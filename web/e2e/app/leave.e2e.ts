@@ -120,12 +120,7 @@ test("the app stands aside for leaving, and lets a stalled one be undone", async
       "couldn't finish",
       { useInnerText: true },
     );
-    // Dispatched rather than clicked: the profile is gone, so keeping the
-    // account opened the name sheet, and `NameGate` declines to OPEN for a
-    // deletion but does not close one already up, so it covers these controls.
-    await page
-      .getByRole("button", { name: /Try deleting again/ })
-      .dispatchEvent("click");
+    await page.getByRole("button", { name: /Try deleting again/ }).click();
     await expect(body, "asking again puts the teardown back").toContainText(
       "Deleting your kip",
       { useInnerText: true },

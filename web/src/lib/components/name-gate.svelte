@@ -122,7 +122,12 @@
     // A teardown deletes the profile as its second-to-last act, so an account
     // on its way out reaches exactly this state — and asked the person who had
     // just left what to call them, over the screen saying they were leaving.
-    if (kip.deletion) return;
+    // A sheet an action opened goes too, or it sits over that screen's buttons;
+    // not mid-submit, which would pull it from under its own write.
+    if (kip.deletion) {
+      if (held && !busy) held = null;
+      return;
+    }
     if (
       !kip.profileReady ||
       kip.anonymous ||

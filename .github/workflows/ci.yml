@@ -24,7 +24,7 @@ jobs:
         with:
           bun-version: 1.4.2
 
-      # The Firestore rules emulator (test:rules) runs on the JVM.
+      # The Firestore rules emulator (rules) runs on the JVM.
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
