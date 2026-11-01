@@ -53,9 +53,7 @@
   );
 </script>
 
-{#snippet dates(
-  shown: readonly PortalWindow[],
-)}
+{#snippet dates(shown: readonly PortalWindow[])}
   <ul class="flex flex-col divide-y divide-border border-t border-border">
     {#each shown as slot (slot.id)}
       <li class="flex items-center gap-3 py-3">
