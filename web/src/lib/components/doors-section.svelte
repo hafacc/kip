@@ -266,9 +266,7 @@
      sheets have since run out of anything to say there, and 32px of empty sheet
      under the button on every render reads as the layout having broken rather
      than as room being kept. -->
-{#snippet problem(
-  message: string | null,
-)}
+{#snippet problem(message: string | null)}
   <p
     aria-live="polite"
     class="text-sm leading-5 text-danger {message ? "mt-3" : ""}"

@@ -8,6 +8,11 @@ updates:
     groups:
       web:
         patterns: ["*"]
+    # TypeScript 7 breaks `svelte-kit sync` and `svelte-check`, so the whole
+    # group's PR fails until they support it.
+    ignore:
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directory: /functions
